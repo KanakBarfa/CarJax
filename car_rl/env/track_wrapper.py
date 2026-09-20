@@ -122,6 +122,7 @@ class TorchBatchedTrackEnv:
             "ds": torch.from_dlpack(info["ds"]).to(self.device),
             "lap": torch.from_dlpack(info["lap"]).to(self.device),
             "wall_hit": torch.from_dlpack(info["wall_hit"]).to(self.device),
+            "lapped": torch.from_dlpack(info["lapped"]).to(self.device),
             "track_length": torch.from_dlpack(info["track_length"]).to(self.device),
         }
         # expose low-level commands for logging/demo (steer, torque)

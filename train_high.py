@@ -17,6 +17,8 @@ def main():
     p.add_argument("--exp-name", type=str, default="car_high_ppo")
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     p.add_argument("--gamma", type=float, default=0.995)
+    p.add_argument("--init-from", type=str, default=None,
+                   help="High-level checkpoint to fine-tune from (e.g. checkpoints/high_latest.pt)")
     args = p.parse_args()
 
     config = PPOConfig(
@@ -29,7 +31,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         gamma=args.gamma,
     )
-    PPOHighTrainer(config, TrackParams()).train()
+    PPOHighTrainer(config, TrackParams(), init_from=args.init_from).train()
 
 
 if __name__ == "__main__":

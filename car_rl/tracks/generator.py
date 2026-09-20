@@ -18,9 +18,9 @@ import jax.numpy as jnp
 NUM_CONTROL = 10
 NUM_CENTER = 256
 HALF_WIDTH = 6.0
-BASE_RADIUS = 70.0
-RADIUS_NOISE = 22.0
-ANGLE_JITTER = 0.22  # rad, kept < half spacing (pi/10 ~ 0.31) to avoid loops
+BASE_RADIUS = 65.0
+RADIUS_NOISE = 30.0   # wide range: fast sweepers to sharp hairpins
+ANGLE_JITTER = 0.27   # kept < half spacing (pi/10 ~ 0.31) to avoid loops
 
 
 class TrackData(NamedTuple):
@@ -51,8 +51,14 @@ def generate_track(
     rng: jax.random.PRNGKey,
     half_width: float = HALF_WIDTH,
 ) -> TrackData:
-    """Pure-functional random closed-loop track from an RNG key."""
-    rng_r, rng_a = jax.random.split(rng, 2)
+    """Pure-functional random closed-loop track from an RNG key.
+
+    Every call randomly mirrors the layout (kills left/right bias) and
+    randomly flips the race direction (clockwise vs anticlockwise), so the
+    high-level agent must drive from lidar, not memorize turn sequences.
+    """
+    rng_r, rng_a, rng_f = jax.random.split(rng, 3)
+    rng_m, rng_d = jax.random.split(rng_f, 2)
 
     base_angles = jnp.linspace(0.0, 2.0 * jnp.pi, NUM_CONTROL, endpoint=False)
     jitter = jax.random.uniform(
@@ -63,6 +69,10 @@ def generate_track(
         rng_r, shape=(NUM_CONTROL,), minval=-RADIUS_NOISE, maxval=RADIUS_NOISE
     )
     control = jnp.stack([radii * jnp.cos(angles), radii * jnp.sin(angles)], axis=1)
+
+    # Random mirror (negate y) -> left/right corner bias eliminated
+    mirror = jax.random.bernoulli(rng_m, 0.5)
+    control = jnp.where(mirror, control * jnp.array([1.0, -1.0]), control)
 
     # Uniform parameter samples over [0, NUM_CONTROL)
     t = jnp.linspace(0.0, float(NUM_CONTROL), NUM_CENTER, endpoint=False)
@@ -77,6 +87,11 @@ def generate_track(
         return _catmull_rom(p0, p1, p2, p3, f)
 
     center = jax.vmap(sample_one)(seg, frac)  # (256, 2)
+
+    # Random race direction: traverse the loop clockwise or anticlockwise.
+    # Start line stays at index 0, tangent follows automatically.
+    reverse = jax.random.bernoulli(rng_d, 0.5)
+    center = jnp.where(reverse, center[::-1], center)
 
     # Tangents (central differences on closed loop) -> normals
     nxt = jnp.roll(center, -1, axis=0)

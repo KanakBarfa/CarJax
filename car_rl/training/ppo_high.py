@@ -14,13 +14,14 @@ from car_rl.training.config import PPOConfig
 
 
 class PPOHighTrainer:
-    """PPO for the 11-dim lidar obs -> 2-dim ego command policy.
+    """PPO for the 12-dim lidar obs -> 2-dim ego command policy.
 
     Reuses PPOConfig fields (num_envs, num_steps, lr, gamma, ...).
     Only the high-level net is optimized; the low-level driver stays frozen.
     """
 
-    def __init__(self, config: PPOConfig = PPOConfig(), track_params: TrackParams = TrackParams()):
+    def __init__(self, config: PPOConfig = PPOConfig(), track_params: TrackParams = TrackParams(),
+                 init_from: str = None):
         self.cfg = config
         self.device = torch.device(config.device)
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
@@ -35,6 +36,11 @@ class PPOHighTrainer:
         self.agent = ActorCritic(
             obs_dim=self.env.obs_dim, act_dim=self.env.act_dim, hidden_dim=256
         ).to(self.device)
+        if init_from and os.path.exists(init_from):
+            self.agent.load_state_dict(torch.load(init_from, map_location=self.device))
+            print(f"[high] fine-tuning from {init_from}")
+        # Fresh best-tracker: reward scale changed with new env, old best isn't comparable.
+        self.best_reward = -float("inf")
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.learning_rate, eps=1e-5)
         self.writer = SummaryWriter(os.path.join(self.cfg.tensorboard_dir, self.cfg.exp_name))
 
@@ -48,7 +54,6 @@ class PPOHighTrainer:
         self.batch_size = self.cfg.num_envs * self.cfg.num_steps
         self.minibatch_size = self.batch_size // self.cfg.num_minibatches
         self.num_iterations = max(1, self.cfg.total_timesteps // self.batch_size)
-        self.best_reward = -float("inf")
 
     def train(self):
         print("=== Starting High-Level Track PPO ===")
@@ -66,7 +71,7 @@ class PPOHighTrainer:
                 frac = 1.0 - (iteration - 1.0) / self.num_iterations
                 self.optimizer.param_groups[0]["lr"] = frac * self.cfg.learning_rate
 
-            sum_speed = sum_ds = sum_wall = sum_lap = 0.0
+            sum_speed = sum_ds = sum_wall = sum_lap = sum_lapped = 0.0
             for step in range(self.cfg.num_steps):
                 global_step += self.cfg.num_envs
                 self.obs[step] = next_obs
@@ -82,6 +87,7 @@ class PPOHighTrainer:
                 sum_ds += info["ds"].mean().item()
                 sum_wall += info["wall_hit"].mean().item()
                 sum_lap += info["lap"].float().mean().item()
+                sum_lapped += info["lapped"].mean().item()
 
             with torch.no_grad():
                 next_value = self.agent.get_value(next_obs).reshape(-1)
@@ -144,12 +150,14 @@ class PPOHighTrainer:
             print(
                 f"Iter {iteration:03d}/{self.num_iterations:03d} | Step {global_step:,} | "
                 f"R: {mean_reward:+6.3f} | v: {sum_speed/n:4.1f} m/s | "
-                f"ds: {sum_ds/n:+.3f} m | wall: {sum_wall/n:.3f} | lap: {sum_lap/n:.2f} | SPS: {sps:,}"
+                f"ds: {sum_ds/n:+.3f} m | wall: {sum_wall/n:.3f} | "
+                f"lap: {sum_lap/n:.2f} | lapped: {sum_lapped/n:.4f} | SPS: {sps:,}"
             )
             self.writer.add_scalar("high/mean_reward", mean_reward, global_step)
             self.writer.add_scalar("high/mean_speed", sum_speed / n, global_step)
             self.writer.add_scalar("high/mean_ds", sum_ds / n, global_step)
             self.writer.add_scalar("high/wall_rate", sum_wall / n, global_step)
+            self.writer.add_scalar("high/lap_rate", sum_lapped / n, global_step)
 
             if mean_reward > self.best_reward:
                 self.best_reward = mean_reward

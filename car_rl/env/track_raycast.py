@@ -2,8 +2,8 @@
 JAX segment raycaster for track railings + wall collision helpers.
 
 High-level lidar spec (user locked):
-- 8 rays total: 6 uniform across the front [-90..+90 deg ego],
-  2 in the back at [+150, -150 deg ego].
+- 9 rays total: 7 uniform across the front [-90..+90 deg ego] including
+  a dead-ahead 0 deg ray, plus 2 in the back at [+150, -150 deg ego].
 - Normalized distances in [0, 1] (divided by max_range).
 - Observations also include vx, vy, omega only (no map/position).
 """
@@ -12,12 +12,13 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-# 6 front uniform over [-90, +90], 2 back at +/-150 deg
+# 7 front uniform over [-90, +90] incl. dead-ahead 0, 2 back at +/-150 deg
 RAY_ANGLES = jnp.array(
     [
         -jnp.pi / 2.0,          # -90 front-left
         -jnp.pi * 0.3,          # -54
         -jnp.pi * 0.1,          # -18
+        0.0,                    #   0 dead ahead
         jnp.pi * 0.1,           # +18
         jnp.pi * 0.3,           # +54
         jnp.pi / 2.0,           # +90 front-right
@@ -26,8 +27,8 @@ RAY_ANGLES = jnp.array(
     ],
     dtype=jnp.float32,
 )
-NUM_RAYS = 8
-MAX_RANGE = 35.0
+NUM_RAYS = 9
+MAX_RANGE = 60.0  # ~3 s of anticipation at 20 m/s; brakes are weak so it must see hairpins early
 
 
 def ray_segment_t(

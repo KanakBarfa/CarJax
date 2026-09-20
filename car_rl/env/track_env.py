@@ -27,7 +27,7 @@ from car_rl.env.track_raycast import (
     closest_wall,
 )
 
-# High obs dim: 8 rays + vx + vy + omega = 11
+# High obs dim: 9 rays + vx + vy + omega = 12
 HIGH_OBS_DIM = NUM_RAYS + 3
 HIGH_ACT_DIM = 2
 
@@ -40,9 +40,10 @@ class TrackParams(NamedTuple):
     omega_scale: float = 4.0
     max_desired_vel: float = 22.0
     car_radius: float = 1.1
-    max_steps: int = 1500  # 30 s at 50 Hz
+    max_steps: int = 3000  # 60 s at 50 Hz: laps (~450 m) must be completable
     progress_scale: float = 2.0   # reward per meter advanced
-    wall_penalty: float = 5.0
+    wall_penalty: float = 50.0    # crash must wipe ~100 steps of progress, not 10
+    lap_bonus: float = 100.0      # finishing is the goal; makes survival worthwhile
     slip_penalty: float = 0.2
 
 
@@ -104,7 +105,7 @@ def compute_low_obs(
 
 
 def compute_high_obs(state: TrackState, params: TrackParams) -> jnp.ndarray:
-    """11-dim: [8 normalized rays, vx/s, vy/s, omega/s]. No position, no map."""
+    """12-dim: [9 normalized rays, vx/s, vy/s, omega/s]. No position, no map."""
     rays = cast_rays_against_segments(
         state.vehicle.x,
         state.vehicle.y,
@@ -164,7 +165,8 @@ def track_step(
     torque_cmd = jnp.clip(low_action[1], -1.0, 1.0)
     veh = step_physics(state.vehicle, steer_cmd, torque_cmd, params.vehicle)
 
-    # --- Railing collision: hard wall, push out + damp ---
+    # --- Railing collision: any touch ends the episode, so just push the
+    # car back inside for a clean terminal state and scrub velocity ---
     dist, cx, cy = closest_wall(veh.x, veh.y, state.walls)
     hit = dist < params.car_radius
     push = params.car_radius - dist
@@ -173,9 +175,9 @@ def track_step(
     veh = veh._replace(
         x=jnp.where(hit, veh.x + nx * push, veh.x),
         y=jnp.where(hit, veh.y + ny * push, veh.y),
-        vx=jnp.where(hit, veh.vx * 0.35, veh.vx),
-        vy=jnp.where(hit, veh.vy * 0.35, veh.vy),
-        omega=jnp.where(hit, veh.omega * 0.6, veh.omega),
+        vx=jnp.where(hit, veh.vx * 0.3, veh.vx),
+        vy=jnp.where(hit, veh.vy * 0.3, veh.vy),
+        omega=jnp.where(hit, veh.omega * 0.5, veh.omega),
     )
 
     # --- Progress along centerline ---
@@ -191,11 +193,13 @@ def track_step(
     reward = (
         ds * params.progress_scale
         - jnp.where(hit, params.wall_penalty, 0.0)
+        + jnp.where(crossed, params.lap_bonus, 0.0)
         - params.slip_penalty * jnp.abs(veh.vy) / params.v_scale
     )
 
     new_step = state.step_count + 1
-    done = new_step >= params.max_steps
+    # Terminal on wall touch (crash) or timeout. No grinding through walls.
+    done = (new_step >= params.max_steps) | hit
     next_state = TrackState(
         vehicle=veh,
         center=state.center,
@@ -216,6 +220,7 @@ def track_step(
         "progress_s": s,
         "lap": new_lap,
         "wall_hit": hit.astype(jnp.float32),
+        "lapped": crossed.astype(jnp.float32),
         "track_length": state.track_length,
         "total_reward": next_state.total_reward,
     }

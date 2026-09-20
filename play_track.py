@@ -77,7 +77,7 @@ def main():
     params = TrackParams()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    high = ActorCritic(obs_dim=11, act_dim=2).to(device)
+    high = ActorCritic(obs_dim=12, act_dim=2).to(device)
     if os.path.exists("checkpoints/high_best.pt"):
         high.load_state_dict(torch.load("checkpoints/high_best.pt", map_location=device))
         print("Loaded trained high-level policy.")
@@ -151,7 +151,12 @@ def main():
                 torch.tensor(lo, device=device).unsqueeze(0)).squeeze(0), -1, 1)
             la_np = la.cpu().numpy()
 
-        state, _, _, _, info = jitted_step(state, jnp.asarray(la_np, dtype=jnp.float32))
+        state, _, _, done, info = jitted_step(state, jnp.asarray(la_np, dtype=jnp.float32))
+        if bool(done):
+            # Crash or timeout: fresh random track, keep playing
+            rng, k = jax.random.split(rng)
+            state, _ = track_reset(k, params)
+            man_tvx = man_tvy = man_speed = 0.0
         wall_flash = 12 if float(info["wall_hit"]) > 0 else max(0, wall_flash - 1)
 
         cam_x += (float(state.vehicle.x) - cam_x) * 0.25
@@ -178,8 +183,8 @@ def main():
         th = float(state.vehicle.theta)
         car_sx, car_sy = world_to_screen(cx, cy, cam_x, cam_y)
 
-        # rays
-        ray_dists = ho[:8] * MAX_RANGE
+        # rays (9: 7 front incl. dead-ahead, 2 back)
+        ray_dists = ho[:9] * MAX_RANGE
         for ang, d in zip(np.asarray(RAY_ANGLES), ray_dists):
             ex = cx + math.cos(th + float(ang)) * float(d)
             ey = cy + math.sin(th + float(ang)) * float(d)

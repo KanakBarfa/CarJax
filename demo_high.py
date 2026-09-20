@@ -32,7 +32,7 @@ def run_eval(high_ckpt="checkpoints/high_best.pt", low_ckpt="checkpoints/best_mo
     params = TrackParams()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    high = ActorCritic(obs_dim=11, act_dim=2).to(device)
+    high = ActorCritic(obs_dim=12, act_dim=2).to(device)
     if os.path.exists(high_ckpt):
         high.load_state_dict(torch.load(high_ckpt, map_location=device))
         print(f"Loaded high-level policy from {high_ckpt}")
@@ -46,12 +46,15 @@ def run_eval(high_ckpt="checkpoints/high_best.pt", low_ckpt="checkpoints/best_mo
     low.eval()
 
     jitted_step = jax.jit(lambda s, a: track_step(s, a, params))
-    state, _ = track_reset(jax.random.PRNGKey(seed), params)
+    rng = jax.random.PRNGKey(seed)
+    rng, k = jax.random.split(rng)
+    state, _ = track_reset(k, params)
     center = np.asarray(state.center)
     walls = np.asarray(state.walls)
     track_len = float(state.track_length)
 
     xs, ys, speeds, des_speeds, min_rays, laps, wall = [], [], [], [], [], [], []
+    crashes = 0
     with torch.no_grad():
         for _ in range(steps):
             ho = compute_high_obs(state, params)
@@ -69,13 +72,17 @@ def run_eval(high_ckpt="checkpoints/high_best.pt", low_ckpt="checkpoints/best_mo
             ys.append(float(state.vehicle.y))
             speeds.append(float(jnp.sqrt(state.vehicle.vx**2 + state.vehicle.vy**2)))
             des_speeds.append(float(des))
-            min_rays.append(float(jnp.min(ho[:8])) * params.max_range)
+            min_rays.append(float(jnp.min(ho[:9])) * params.max_range)
             laps.append(int(info["lap"]))
             wall.append(float(info["wall_hit"]))
+            if bool(done):
+                crashes += int(float(info["wall_hit"]))
+                rng, k = jax.random.split(rng)
+                state, _ = track_reset(k, params)
 
     xs, ys = np.array(xs), np.array(ys)
     print(f"Track length: {track_len:.0f} m | laps: {laps[-1]} | "
-          f"wall hits: {int(np.sum(wall))} | top speed: {max(speeds)*3.6:.0f} km/h")
+          f"crashes: {crashes} | top speed: {max(speeds)*3.6:.0f} km/h")
 
     fig = plt.figure(figsize=(14, 8))
     gs = fig.add_gridspec(2, 2)
