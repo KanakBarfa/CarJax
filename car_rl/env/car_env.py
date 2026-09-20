@@ -127,9 +127,10 @@ def compute_reward(
     # Linear tracking reward
     r_track = 3.0 - 2.5 * norm_ex - 2.0 * norm_ey
     
-    # Precision bonus when total velocity error is small (< 1.5 m/s)
+    # Exponential velocity tracking bonus (Laplace kernel):
+    # Provides sharp, non-vanishing gradient right up to zero error (unlike Gaussian which flattens near zero)
     total_err = jnp.sqrt(ex**2 + ey**2 + 1e-4)
-    r_bonus = 3.0 * jnp.exp(-0.5 * (total_err / 1.5)**2)
+    r_bonus = 3.0 * jnp.exp(-total_err / 1.5)
     
     # Target heading alignment
     target_speed = jnp.sqrt(target_vx**2 + target_vy**2 + 1e-4)
