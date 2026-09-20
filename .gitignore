@@ -1,4 +1,29 @@
-*.pyc
-.vscode/
-__pycache__/
+# Virtual Environment
+.venv
 .venv/
+env
+env/
+venv
+venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Checkpoints & logs
+checkpoints/
+runs/
+logs/
+*.pt
+*.pth
+*.png
+
+# OS files
+.DS_Store
