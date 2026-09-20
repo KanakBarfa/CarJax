@@ -63,16 +63,15 @@ def sample_goal(rng: jax.random.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray
 
 def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
     """
-    Constructs the 9-dimensional ego-centric observation vector:
+    Constructs the 8-dimensional ego-centric observation vector:
     1. ex: Forward speed error (target_speed - vx) / v_scale
-    2. ey: Lateral slip error (0 - vy) / v_scale
-    3. Target speed: target_speed / v_scale
-    4. cos_target_ego: cos of heading error relative to target direction
-    5. sin_target_ego: sin of heading error relative to target direction (>0 turn left, <0 turn right)
-    6. Current longitudinal speed: vx / v_scale
-    7. Current lateral slip speed: vy / v_scale
-    8. Steering angle: steer / max_steer
-    9. Yaw rate: omega / omega_scale
+    2. Target speed: target_speed / v_scale
+    3. cos_target_ego: cos of heading error relative to target direction
+    4. sin_target_ego: sin of heading error relative to target direction (>0 turn left, <0 turn right)
+    5. Current longitudinal speed: vx / v_scale
+    6. Current lateral slip speed: vy / v_scale
+    7. Steering angle: steer / max_steer
+    8. Yaw rate: omega / omega_scale
     """
     veh = state.vehicle
     
@@ -102,6 +101,7 @@ def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
     return obs
 
 
+
 def compute_reward(
     veh: VehicleState,
     target_vx: jnp.ndarray,
@@ -111,7 +111,7 @@ def compute_reward(
 ) -> jnp.ndarray:
     """
     Direction-aligning, anti-spin velocity tracking reward:
-    - Strong incentive to turn and align forward heading with target direction
+    - Sharp linear heading error penalty for precise directional alignment
     - Forward speed tracking with zero steady-state error
     - Strict lateral slip and power-oversteer spinout prevention
     """
@@ -119,53 +119,54 @@ def compute_reward(
     target_angle = jnp.arctan2(target_vy, target_vx)
     heading_err = jnp.arctan2(jnp.sin(target_angle - veh.theta), jnp.cos(target_angle - veh.theta))
     cos_target_ego = jnp.cos(heading_err)
+    abs_heading_err = jnp.abs(heading_err)
     
     # Forward speed error and lateral slip
     speed_err = jnp.abs(target_speed - veh.vx)
     norm_ey = jnp.abs(veh.vy) / params.v_norm_scale
     
-    # Strong alignment incentive: +2.5 when facing target, -2.5 when facing away
+    # Sharp heading alignment: linear |heading_err| penalty creates strong gradient
+    # even at small angles (unlike cos which is flat near 0).
+    # 15 deg = 0.26 rad -> penalty = 0.78; 5 deg = 0.087 rad -> penalty = 0.26
+    heading_pen = 3.0 * abs_heading_err
+    
+    # Cosine alignment bonus (supplements the linear penalty with smooth curvature)
     align_incentive = 2.5 * cos_target_ego
     
-    # Reverse velocity penalty: strongly discourage driving in reverse (incentive to align forward!)
+    # Reverse velocity penalty
     reverse_pen = 4.0 * jnp.maximum(0.0, -veh.vx)
     
-    # Decisive launch incentive: when below target speed, pointing forward (cos > 0.85),
-    # and NOT sliding laterally, reward full throttle for rapid launch
+    # Decisive launch incentive: wider gate (~30 deg) so car accelerates while turning
     throttle_cmd = jnp.maximum(0.0, action[1])
-    is_aligned = cos_target_ego > 0.85
-    not_sliding = jnp.abs(veh.vy) < 0.4
+    is_aligned = abs_heading_err < 0.5  # ~30 degrees — accelerate while correcting
+    not_sliding = jnp.abs(veh.vy) < 0.5
     accel_incentive = jnp.where((target_speed - veh.vx > 1.0) & is_aligned & not_sliding, 2.0 * throttle_cmd, 0.0)
     
-    # Overshoot penalty: only penalize over-speeding beyond 0.8 m/s (~3 km/h)
+    # Overshoot penalty
     overshoot_pen = jnp.where(veh.vx - target_speed > 0.8, 1.5 * (veh.vx - target_speed - 0.8), 0.0)
     
-    # Direct speed tracking + lateral error tracking + alignment incentive
-    r_track = 4.0 - 0.5 * speed_err + align_incentive + accel_incentive - overshoot_pen - reverse_pen - 2.0 * norm_ey
+    # Base tracking reward (stronger speed_err coefficient: 1.0 instead of 0.5)
+    r_track = 4.0 - 1.0 * speed_err + align_incentive + accel_incentive - heading_pen - overshoot_pen - reverse_pen - 2.0 * norm_ey
     
-    # Dual-scale exponential velocity tracking bonus:
-    # Conditioned on being aligned forward (cos > 0.7) to lock in exact speed without spinning mid-corner
+    # Speed bonus: tight alignment gate (must be within ~15 deg to earn precision bonus)
     total_err = jnp.sqrt((target_speed - veh.vx)**2 + veh.vy**2 + 1e-4)
-    r_bonus = jnp.where(
-        cos_target_ego > 0.7,
-        2.0 * jnp.exp(-total_err / 2.5) + 4.0 * jnp.exp(-total_err / 0.7),
-        0.0,
-    )
+    align_gate = jnp.exp(-abs_heading_err / 0.15)  # Gaussian-ish: ~1.0 at 0 deg, ~0.07 at 15 deg
+    r_bonus = align_gate * (2.0 * jnp.exp(-total_err / 2.5) + 4.0 * jnp.exp(-total_err / 0.7))
     
-    # Straight-line stability penalty: when aligned, penalize unnecessary steering wiggle
+    # Straight-line stability: only penalize steering when heading is VERY close (< 3 deg)
     steer_norm = jnp.abs(veh.steer / params.vehicle.max_steer)
-    straight_steer_penalty = jnp.where(is_aligned & not_sliding, 1.0 * steer_norm, 0.0)
+    straight_steer_penalty = jnp.where((abs_heading_err < 0.05) & not_sliding, 0.5 * steer_norm, 0.0)
     
-    # Lateral slip penalty (loss of tire grip)
+    # Lateral slip penalty
     slip_pen = 3.0 * jnp.maximum(0.0, jnp.abs(veh.vy) - 0.4)
     
-    # High-speed yaw stability penalty:
+    # High-speed yaw stability penalty
     mu_g = params.vehicle.friction_coeff * params.vehicle.gravity
     max_safe_omega = mu_g / jnp.maximum(jnp.abs(veh.vx), 2.0) + 0.3
     excess_omega = jnp.maximum(0.0, jnp.abs(veh.omega) - max_safe_omega)
     stability_pen = 3.0 * excess_omega
     
-    # Power-oversteer penalty: cut throttle if vehicle begins sliding
+    # Power-oversteer penalty
     power_oversteer_pen = jnp.where(jnp.abs(veh.vy) > 0.4, 2.5 * throttle_cmd * (jnp.abs(veh.vy) - 0.4), 0.0)
     
     # Control effort regularization

@@ -14,7 +14,7 @@ class PPOConfig:
     # Environment & Rollout
     num_envs: int = 2048
     num_steps: int = 64            # Steps per rollout: 2048 * 64 = 131,072 steps / iter
-    total_timesteps: int = 15_000_000
+    total_timesteps: int = 30_000_000
     
     # PPO Hyperparameters
     learning_rate: float = 8e-4

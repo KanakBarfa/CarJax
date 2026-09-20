@@ -31,7 +31,7 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
     params = EnvParams()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
-    agent = ActorCritic(obs_dim=9, act_dim=2).to(device)
+    agent = ActorCritic(obs_dim=8, act_dim=2).to(device)
     if os.path.exists(checkpoint_path):
         print(f"Loading weights from {checkpoint_path}...")
         agent.load_state_dict(torch.load(checkpoint_path, map_location=device))
