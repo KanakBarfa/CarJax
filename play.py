@@ -158,16 +158,18 @@ def main():
         # 2. Control Processing
         keys = pygame.key.get_pressed()
         
-        # Compute mouse target in world coordinates
-        mouse_wx = cam_x + (mouse_px - WINDOW_WIDTH / 2.0) / PIXELS_PER_METER
-        mouse_wy = cam_y - (mouse_py - WINDOW_HEIGHT / 2.0) / PIXELS_PER_METER
-        dx = mouse_wx - float(state.x)
-        dy = mouse_wy - float(state.y)
-        dist_to_mouse = math.hypot(dx, dy)
+        # Screen position of car
+        car_sx, car_sy = world_to_screen(float(state.x), float(state.y), cam_x, cam_y)
+        
+        # Exact screen-space distance and direction from car to cursor (immune to camera lag!)
+        dx_screen = mouse_px - car_sx
+        dy_screen = -(mouse_py - car_sy)  # Inverted because screen Y points down, world Y points up
+        screen_dist_px = math.hypot(dx_screen, dy_screen)
+        dist_to_mouse = screen_dist_px / PIXELS_PER_METER
         
         if dist_to_mouse > 0.4:
-            target_ux = dx / dist_to_mouse
-            target_uy = dy / dist_to_mouse
+            target_ux = dx_screen / screen_dist_px
+            target_uy = dy_screen / screen_dist_px
             # Distance directly determines desired speed (magnitude of vector)!
             desired_speed = min(env_params.max_desired_vel, dist_to_mouse * speed_sensitivity)
         else:
@@ -237,9 +239,9 @@ def main():
             jnp.array(torque_act, dtype=jnp.float32),
         )
         
-        # Smooth camera tracking
-        cam_x += (float(state.x) - cam_x) * 0.1
-        cam_y += (float(state.y) - cam_y) * 0.1
+        # Responsive camera tracking
+        cam_x += (float(state.x) - cam_x) * 0.4
+        cam_y += (float(state.y) - cam_y) * 0.4
         
         # 4. Skid Marks Calculation (Tire Tracks)
         lr = params.lr

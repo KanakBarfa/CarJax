@@ -147,12 +147,14 @@ def step_physics(
     steer_delta = jnp.clip(steer_diff, -params.steer_rate * params.dt, params.steer_rate * params.dt)
     new_steer = state.steer + steer_delta
     
-    # 2. Convert torque command to drive/brake wheel force
-    is_throttle = torque_cmd >= 0.0
+    # 2. Convert torque command to drive/brake wheel force with progressive throttle curve
+    # Exponent 1.5 provides high-precision modulation at cruising speeds while retaining 100% full power at +/-1.0
+    effective_torque = jnp.sign(torque_cmd) * (jnp.abs(torque_cmd) ** 1.5)
+    is_throttle = effective_torque >= 0.0
     torque = jnp.where(
         is_throttle,
-        torque_cmd * params.max_drive_torque,
-        torque_cmd * params.max_brake_torque,
+        effective_torque * params.max_drive_torque,
+        effective_torque * params.max_brake_torque,
     )
     fx_cmd = torque / params.wheel_radius
     

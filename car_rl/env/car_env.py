@@ -29,30 +29,36 @@ class EnvParams(NamedTuple):
     v_norm_scale: float = 25.0      # Velocity normalization scale
     omega_norm_scale: float = 4.0   # Yaw rate normalization scale
     
-    # Episode parameters
-    max_episode_steps: int = 250    # 5.0 seconds at 50 Hz
-    goal_resample_steps: int = 50   # Resample a new goal every 1.0s for dynamic transitions
+    # Episode parameters (random target duration from 3 to 15 seconds)
+    max_episode_steps: int = 750        # Up to 15.0 seconds at 50 Hz
+    min_goal_duration_steps: int = 150  # 3.0 seconds at 50 Hz
+    max_goal_duration_steps: int = 750  # 15.0 seconds at 50 Hz
 
 
 class EnvState(NamedTuple):
     vehicle: VehicleState
-    target_vx: jnp.ndarray    # World-frame target velocity X (m/s)
-    target_vy: jnp.ndarray    # World-frame target velocity Y (m/s)
-    step_count: jnp.ndarray   # Current episode step
-    total_reward: jnp.ndarray # Cumulative reward
-    rng: jax.random.PRNGKey   # Random key for resets/resampling
+    target_vx: jnp.ndarray      # World-frame target velocity X (m/s)
+    target_vy: jnp.ndarray      # World-frame target velocity Y (m/s)
+    step_count: jnp.ndarray     # Current episode step
+    goal_timer: jnp.ndarray     # Steps elapsed under current target
+    goal_duration: jnp.ndarray  # Total duration to hold target (150 to 750 steps / 3s to 15s)
+    total_reward: jnp.ndarray   # Cumulative reward
+    rng: jax.random.PRNGKey     # Random key for resets/resampling
 
 
-def sample_goal(rng: jax.random.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray, jnp.ndarray, jax.random.PRNGKey]:
-    """Sample a random 2D target velocity vector across all angles [-pi, pi]."""
-    rng_angle, rng_speed, rng_out = jax.random.split(rng, 3)
+def sample_goal(rng: jax.random.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jax.random.PRNGKey]:
+    """Sample a random 2D target velocity vector across all angles [-pi, pi] and duration [3s, 15s]."""
+    rng_angle, rng_speed, rng_dur, rng_out = jax.random.split(rng, 4)
     angle = jax.random.uniform(rng_angle, shape=(), minval=-jnp.pi, maxval=jnp.pi)
     speed = jax.random.uniform(
         rng_speed, shape=(), minval=params.min_desired_vel, maxval=params.max_desired_vel
     )
+    duration = jax.random.randint(
+        rng_dur, shape=(), minval=params.min_goal_duration_steps, maxval=params.max_goal_duration_steps
+    )
     target_vx = speed * jnp.cos(angle)
     target_vy = speed * jnp.sin(angle)
-    return target_vx, target_vy, rng_out
+    return target_vx, target_vy, duration, rng_out
 
 
 def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
@@ -121,16 +127,17 @@ def compute_reward(
     ex = ego_target_vx - veh.vx
     ey = ego_target_vy - veh.vy
     
-    norm_ex = jnp.abs(ex) / params.v_norm_scale
+    speed_err = jnp.abs(ex)
     norm_ey = jnp.abs(ey) / params.v_norm_scale
     
-    # Linear tracking reward
-    r_track = 3.0 - 2.5 * norm_ex - 2.0 * norm_ey
+    # Direct speed penalty + lateral error tracking:
+    # Strongly penalizes longitudinal speed discrepancy (|ex|) to eliminate settling offset
+    r_track = 3.0 - 0.6 * speed_err - 2.0 * norm_ey
     
-    # Exponential velocity tracking bonus (Laplace kernel):
-    # Provides sharp, non-vanishing gradient right up to zero error (unlike Gaussian which flattens near zero)
+    # Tight exponential velocity tracking bonus (Laplace kernel):
+    # Scale sigma = 0.8 m/s (~2.8 km/h): Provides sharp, continuous gradient to zero error
     total_err = jnp.sqrt(ex**2 + ey**2 + 1e-4)
-    r_bonus = 3.0 * jnp.exp(-total_err / 1.5)
+    r_bonus = 3.0 * jnp.exp(-total_err / 0.8)
     
     # Target heading alignment
     target_speed = jnp.sqrt(target_vx**2 + target_vy**2 + 1e-4)
@@ -176,21 +183,33 @@ def compute_reward(
 def env_reset(rng: jax.random.PRNGKey, params: EnvParams = EnvParams()) -> Tuple[EnvState, jnp.ndarray]:
     """
     Pure functional reset.
-    Randomizes starting speed across [0, max_desired_vel] and orientation [-pi, pi].
+    50% of environments start in aligned steady-state cruising:
+    theta = target_angle, vx = target_speed, vy = 0, omega = 0.
+    50% of environments start in randomized speeds and orientations for dynamic transitions.
+    Target speed and heading are held for a random duration between 3.0s and 15.0s (150 to 750 steps).
     """
-    rng_goal, rng_init, rng_spd, rng_out = jax.random.split(rng, 4)
+    rng_mode, rng_goal, rng_init, rng_spd, rng_out = jax.random.split(rng, 5)
     
-    th0 = jax.random.uniform(rng_init, shape=(), minval=-jnp.pi, maxval=jnp.pi)
-    v0 = jax.random.uniform(rng_spd, shape=(), minval=0.0, maxval=params.max_desired_vel)
+    target_vx, target_vy, duration, rng_goal = sample_goal(rng_goal, params)
+    target_speed = jnp.sqrt(target_vx**2 + target_vy**2 + 1e-4)
+    target_angle = jnp.arctan2(target_vy, target_vx)
+    
+    is_steady = jax.random.bernoulli(rng_mode, p=0.5)
+    
+    th0_rand = jax.random.uniform(rng_init, shape=(), minval=-jnp.pi, maxval=jnp.pi)
+    v0_rand = jax.random.uniform(rng_spd, shape=(), minval=0.0, maxval=params.max_desired_vel)
+    
+    th0 = jnp.where(is_steady, target_angle, th0_rand)
+    v0 = jnp.where(is_steady, target_speed, v0_rand)
     veh = init_vehicle_state(theta=th0, vx=v0)
-    
-    target_vx, target_vy, rng_goal = sample_goal(rng_goal, params)
     
     state = EnvState(
         vehicle=veh,
         target_vx=target_vx,
         target_vy=target_vy,
         step_count=jnp.array(0, dtype=jnp.int32),
+        goal_timer=jnp.array(0, dtype=jnp.int32),
+        goal_duration=duration,
         total_reward=jnp.array(0.0, dtype=jnp.float32),
         rng=rng_out,
     )
@@ -218,14 +237,17 @@ def env_step(
         new_veh, state.target_vx, state.target_vy, action, params
     )
     
-    # 3. Dynamic goal resampling
+    # 3. Dynamic goal resampling (triggers when goal_timer >= goal_duration, i.e. 3s to 15s)
     new_step = state.step_count + 1
-    should_resample = (new_step % params.goal_resample_steps == 0) & (new_step < params.max_episode_steps)
+    new_timer = state.goal_timer + 1
+    should_resample = (new_timer >= state.goal_duration) & (new_step < params.max_episode_steps)
     
-    resampled_vx, resampled_vy, new_rng = sample_goal(state.rng, params)
+    resampled_vx, resampled_vy, new_dur, new_rng = sample_goal(state.rng, params)
     
     next_vx = jnp.where(should_resample, resampled_vx, state.target_vx)
     next_vy = jnp.where(should_resample, resampled_vy, state.target_vy)
+    next_dur = jnp.where(should_resample, new_dur, state.goal_duration)
+    next_timer = jnp.where(should_resample, 0, new_timer)
     
     # 4. Spinout detection and early termination
     is_spinout = (jnp.abs(new_veh.vy) > 4.5) & (jnp.abs(new_veh.omega) > 2.2)
@@ -239,6 +261,8 @@ def env_step(
         target_vx=next_vx,
         target_vy=next_vy,
         step_count=new_step,
+        goal_timer=next_timer,
+        goal_duration=next_dur,
         total_reward=state.total_reward + reward,
         rng=new_rng,
     )

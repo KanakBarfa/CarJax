@@ -25,7 +25,7 @@ class PPOConfig:
     update_epochs: int = 4
     clip_coef: float = 0.2
     clip_vloss: bool = True
-    ent_coef: float = 0.005
+    ent_coef: float = 0.0002
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: Optional[float] = None

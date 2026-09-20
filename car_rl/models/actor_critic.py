@@ -42,8 +42,8 @@ class ActorCritic(nn.Module):
             layer_init(nn.Linear(hidden_dim, act_dim), std=0.01),
         )
         
-        # Learnable log standard deviation for continuous Gaussian policy
-        self.actor_logstd = nn.Parameter(torch.zeros(1, act_dim))
+        # Learnable log standard deviation for continuous Gaussian policy (sigma ~ 0.30)
+        self.actor_logstd = nn.Parameter(torch.full((1, act_dim), -1.2))
 
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """Estimate state value V(s)."""

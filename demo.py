@@ -65,6 +65,8 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
         target_vx=jnp.array(tvx0, dtype=jnp.float32),
         target_vy=jnp.array(tvy0, dtype=jnp.float32),
         step_count=jnp.array(0, dtype=jnp.int32),
+        goal_timer=jnp.array(0, dtype=jnp.int32),
+        goal_duration=jnp.array(500, dtype=jnp.int32),
         total_reward=jnp.array(0.0, dtype=jnp.float32),
         rng=rng,
     )
