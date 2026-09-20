@@ -22,9 +22,9 @@ class VehicleParams(NamedTuple):
     max_steer: float = 0.60       # Max front wheel angle (~34.4 degrees)
     steer_rate: float = 3.0       # Max steering angular speed (rad/s)
     
-    # Drivetrain
-    max_drive_torque: float = 1600.0  # Max engine drive torque at rear wheels (N*m)
-    max_brake_torque: float = 3200.0  # Max braking torque (N*m)
+    # Torque limits: pure torque min -600 Nm, max 2400 Nm
+    min_torque: float = -600.0   # Max reverse torque (N*m)
+    max_torque: float = 2400.0   # Max forward drive torque (N*m)
     
     # Resistances
     drag_coeff: float = 0.40      # 0.5 * rho * Cd * A (kg/m)
@@ -95,10 +95,9 @@ def compute_tire_forces(
     f_max_f = params.friction_coeff * fz_f
     f_max_r = params.friction_coeff * fz_r
     
-    # Longitudinal force distribution (RWD: drive torque goes to rear; braking 60/40)
-    is_drive = fx_cmd >= 0.0
-    fx_f_target = jnp.where(is_drive, 0.0, 0.6 * fx_cmd)
-    fx_r_target = jnp.where(is_drive, fx_cmd, 0.4 * fx_cmd)
+    # Longitudinal force distribution (RWD: all drive torque goes to rear axle)
+    fx_f_target = 0.0
+    fx_r_target = fx_cmd
     
     # Clamp longitudinal forces to friction limits
     fx_f = jnp.clip(fx_f_target, -f_max_f, f_max_f)
@@ -147,31 +146,35 @@ def step_physics(
     steer_delta = jnp.clip(steer_diff, -params.steer_rate * params.dt, params.steer_rate * params.dt)
     new_steer = state.steer + steer_delta
     
-    # 2. Convert torque command to drive/brake wheel force with progressive throttle curve
-    # Exponent 1.5 provides high-precision modulation at cruising speeds while retaining 100% full power at +/-1.0
-    effective_torque = jnp.sign(torque_cmd) * (jnp.abs(torque_cmd) ** 1.5)
-    is_throttle = effective_torque >= 0.0
+    # 2. Drivetrain: Pure torque between min_torque (-600 Nm) and max_torque (+2400 Nm)
+    # Action torque_cmd is in [-1, 1]
+    is_forward = torque_cmd >= 0.0
     torque = jnp.where(
-        is_throttle,
-        effective_torque * params.max_drive_torque,
-        effective_torque * params.max_brake_torque,
+        is_forward,
+        torque_cmd * params.max_torque,
+        torque_cmd * jnp.abs(params.min_torque),
     )
-    fx_cmd = torque / params.wheel_radius
+    fx_cmd_raw = torque / params.wheel_radius
     
-    # 3. Compute tire forces with friction ellipse & slip angles
+    # 3. Electronic Stability Control (ESC) / Traction Control System (TCS)
+    # Automatically cuts positive drive torque if rear tires slip laterally (|vy| > 0.4 m/s)
+    # or yaw rate exceeds 1.0 rad/s. Prevents power-oversteer spins and fishtailing!
+    slip_excess = jnp.maximum(0.0, jnp.abs(state.vy) - 0.4)
+    omega_excess = jnp.maximum(0.0, jnp.abs(state.omega) - 1.0)
+    tcs_cut = jnp.clip(1.0 - 2.5 * slip_excess - 1.5 * omega_excess, 0.0, 1.0)
+    fx_cmd = jnp.where(is_forward, fx_cmd_raw * tcs_cut, fx_cmd_raw)
+    
+    # 4. Compute tire forces with friction ellipse & slip angles
     fx_f, fx_r, fy_f, fy_r, _, _ = compute_tire_forces(
         state.vx, state.vy, state.omega, new_steer, fx_cmd, params
     )
     
-    # 4. Aerodynamic drag and rolling resistance
+    # 5. Aerodynamic drag and rolling resistance
     v_norm = jnp.sqrt(state.vx**2 + state.vy**2)
     f_drag = params.drag_coeff * state.vx * v_norm
     f_roll = params.roll_res_coeff * params.mass * params.gravity * jnp.tanh(5.0 * state.vx)
     
-    # 5. Planar equations of motion (body frame)
-    # dvx/dt = (Fx_r + Fx_f*cos(delta) - Fy_f*sin(delta) - Fdrag - Froll)/m + vy*omega
-    # dvy/dt = (Fy_r + Fy_f*cos(delta) + Fx_f*sin(delta))/m - vx*omega
-    # domega/dt = (lf*(Fy_f*cos(delta) + Fx_f*sin(delta)) - lr*Fy_r)/Iz
+    # 6. Planar equations of motion (body frame)
     cos_steer = jnp.cos(new_steer)
     sin_steer = jnp.sin(new_steer)
     
@@ -179,16 +182,17 @@ def step_physics(
     acc_y = (fy_r + fy_f * cos_steer + fx_f * sin_steer) / params.mass - state.vx * state.omega
     alpha_yaw = (params.lf * (fy_f * cos_steer + fx_f * sin_steer) - params.lr * fy_r) / params.iz
     
-    # 6. Integrate body velocities and yaw rate
+    # 7. Integrate body velocities and yaw rate
     new_vx = state.vx + acc_x * params.dt
     new_vy = state.vy + acc_y * params.dt
     new_omega = state.omega + alpha_yaw * params.dt
     
-    # Prevent unreal reverse crawl when braking at standstill
-    speed_sq = new_vx**2 + new_vy**2
-    new_vx = jnp.where((speed_sq < 0.01) & (torque_cmd <= 0.0), 0.0, new_vx)
-    new_vy = jnp.where((speed_sq < 0.01) & (torque_cmd <= 0.0), 0.0, new_vy)
-    new_omega = jnp.where(speed_sq < 0.01, 0.0, new_omega)
+    # Standstill locking: prevent crawl when torque command is zero at low speed
+    is_neutral = jnp.abs(torque_cmd) < 0.04
+    is_stationary = (jnp.abs(new_vx) < 0.08) & (jnp.abs(new_vy) < 0.08)
+    new_vx = jnp.where(is_stationary & is_neutral, 0.0, new_vx)
+    new_vy = jnp.where(is_stationary & is_neutral, 0.0, new_vy)
+    new_omega = jnp.where(is_stationary & is_neutral, 0.0, new_omega)
     
     # 7. Integrate global position and heading
     cos_theta = jnp.cos(state.theta)

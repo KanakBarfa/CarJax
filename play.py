@@ -3,14 +3,18 @@
 Interactive Real-Time UI for 2D Car Simulation & RL Agent.
 
 Features:
-- Dual Modes:
-  * AI Driver Mode: Car uses trained PPO policy to track mouse cursor velocity vector [vx_tgt, vy_tgt]!
-    (Magnitude = speed, Direction = heading -> only 2 inputs!)
-  * Manual Drift Mode: Drive the dynamic vehicle directly with WASD / Arrow Keys + Spacebar Handbrake!
-- Corrected 0-degree vehicle & wheel orientation (length along forward velocity vector).
-- Realistic front wheel steering visualization.
-- Visual tire skid marks during drifts (|vy| > 0.4 m/s).
-- Full real-time telemetry HUD: Speedometer, Drift Meter, Steering Angle, and Torque.
+- Simple Click-to-Move Target Vector:
+  * Left Click anywhere on screen to place the target marker!
+  * The vector from car to marker defines the target velocity vector [vx_tgt, vy_tgt].
+  * Direction = Heading, Distance = Speed.
+  * The car continuously tracks this target velocity vector.
+  * Click again anytime to move the marker.
+  * [Right Click] or [SPACE] : Stop (set target to 0).
+  * [R]                      : Reset vehicle to origin.
+  * Scroll Wheel             : Adjust speed sensitivity scale.
+  * [ESC]                    : Exit.
+- Zero Lag: Bounded skid marks history (solid 60 FPS).
+- Clean Telemetry HUD: Speedometer, Target Speed, Drift Meter, Steer, and Torque.
 """
 
 import os
@@ -43,10 +47,13 @@ CAR_BODY_COLOR = (235, 75, 50)     # Sporty Red
 CAR_ROOF_COLOR = (40, 44, 54)
 CAR_GLASS_COLOR = (100, 160, 220)
 WHEEL_COLOR = (15, 15, 18)
-TARGET_COLOR = (0, 220, 140)       # Neon Green
+TARGET_COLOR = (0, 230, 130)       # Bright Neon Green
+TARGET_LINE = (0, 180, 110)
+ACTUAL_COLOR = (70, 160, 255)      # Cyan Blue
 DRIFT_COLOR = (255, 180, 0)        # Amber / Orange
 TEXT_COLOR = (230, 235, 245)
-HUD_BG = (18, 20, 26, 210)
+TEXT_MUTED = (160, 170, 190)
+HUD_BG = (18, 20, 26, 215)
 
 
 def world_to_screen(wx: float, wy: float, cam_x: float, cam_y: float) -> tuple:
@@ -71,7 +78,6 @@ def draw_oriented_box(surface, color, center_wx, center_wy, length_m, width_m, a
     """
     hl = length_m / 2.0
     hw = width_m / 2.0
-    # 4 corners in local vehicle frame: Front-Left, Front-Right, Rear-Right, Rear-Left
     corners = [(hl, hw), (hl, -hw), (-hl, -hw), (-hl, hw)]
     screen_pts = []
     for lx, ly in corners:
@@ -81,12 +87,32 @@ def draw_oriented_box(surface, color, center_wx, center_wy, length_m, width_m, a
     pygame.draw.polygon(surface, color, screen_pts)
 
 
+def draw_vector_arrow(surface, start_pt, end_pt, color, width=3, head_size=12):
+    """Draws a directional arrow with arrowhead from start_pt to end_pt."""
+    pygame.draw.line(surface, color, start_pt, end_pt, width)
+    dx = end_pt[0] - start_pt[0]
+    dy = end_pt[1] - start_pt[1]
+    length = math.hypot(dx, dy)
+    if length < 5:
+        return
+    angle = math.atan2(dy, dx)
+    p1 = (
+        int(end_pt[0] - head_size * math.cos(angle - math.pi / 6)),
+        int(end_pt[1] - head_size * math.sin(angle - math.pi / 6)),
+    )
+    p2 = (
+        int(end_pt[0] - head_size * math.cos(angle + math.pi / 6)),
+        int(end_pt[1] - head_size * math.sin(angle + math.pi / 6)),
+    )
+    pygame.draw.polygon(surface, color, [end_pt, p1, p2])
+
+
 def main():
     pygame.init()
     pygame.font.init()
     
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.DOUBLEBUF)
-    pygame.display.set_caption("2D GPU Car Simulation - Interactive AI & Drift UI")
+    pygame.display.set_caption("2D GPU Car Simulation - Click Target Velocity")
     clock = pygame.time.Clock()
     
     font_large = pygame.font.SysFont("DejaVu Sans", 24, bold=True)
@@ -110,127 +136,134 @@ def main():
     state = init_vehicle_state(x=0.0, y=0.0, theta=0.0, vx=0.0)
     cam_x, cam_y = 0.0, 0.0
     
-    # Modes & Commands
-    is_ai_mode = True
-    speed_sensitivity = 1.0  # (m/s) per meter of distance
-    desired_speed = 0.0      # Dynamically calculated from distance to cursor
-    target_ux = 1.0
-    target_uy = 0.0
+    # Clicked Target Velocity Vector (Offset from car in screen pixels)
+    target_dx = 0.0
+    target_dy = 0.0
+    desired_speed = 0.0
+    target_vx = 0.0
+    target_vy = 0.0
+    speed_sensitivity = 2.0  # Speed scaling factor
     
-    # Skid marks history in world coordinates (wx1, wy1, wx2, wy2, alpha)
-    skid_marks = collections.deque(maxlen=1500)
+    # Skid marks history: capped to 150 items to eliminate render latency
+    skid_marks = collections.deque(maxlen=150)
     prev_left_tire = None
     prev_right_tire = None
     
-    # JIT-compile physics step for ultra-low latency
+    # JIT-compile physics step
     physics_step_jit = jax.jit(lambda s, st, t: step_physics(s, st, t, params))
     
-    running = True
-    print("\n--- UI Controls ---")
-    print(" [M]         : Toggle AI Driver / Manual Drive Mode")
-    print(" Mouse Move  : Aim direction & distance (further = faster!)")
-    print(" Scroll Wheel: Adjust speed sensitivity scale")
-    print(" [W] / [S]   : Throttle / Brakes (Manual Mode)")
-    print(" [A] / [D]   : Steer Left / Right (Manual Mode)")
-    print(" [SPACE]     : Handbrake Drift (Manual Mode)")
-    print(" [R]         : Reset Car Position")
-    print(" [ESC]       : Exit\n")
+    print("\n=======================================================")
+    print("   2D GPU Car Simulation - Click to Move Target Marker ")
+    print("=======================================================")
+    print(" CONTROLS:")
+    print("   [Left Click]   : Click anywhere to place the target marker!")
+    print("                    (Vector from car to marker = Target Velocity)")
+    print("   [Right Click]  : Stop (set target velocity = 0)")
+    print("   [SPACE]        : Stop (set target velocity = 0)")
+    print("   Scroll Wheel   : Adjust speed sensitivity scale")
+    print("   [R]            : Reset car position")
+    print("   [ESC]          : Exit")
+    print("=======================================================\n")
     
+    running = True
     while running:
         dt = clock.tick(60) / 1000.0  # 60 FPS
-        mouse_px, mouse_py = pygame.mouse.get_pos()
         
-        # 1. Event Handling
+        car_sx, car_sy = world_to_screen(float(state.x), float(state.y), cam_x, cam_y)
+        
+        # 1. Event Handling (Mouse Clicks & Keys)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    # Left Click: Place target marker relative to car
+                    mx, my = event.pos
+                    dx = mx - car_sx
+                    dy = my - car_sy
+                    dist_px = math.hypot(dx, dy)
+                    
+                    if dist_px < 15:
+                        # Clicked directly on the car: stop
+                        target_dx = 0.0
+                        target_dy = 0.0
+                        desired_speed = 0.0
+                        target_vx = 0.0
+                        target_vy = 0.0
+                    else:
+                        target_dx = dx
+                        target_dy = dy
+                        dist_m = dist_px / PIXELS_PER_METER
+                        desired_speed = min(env_params.max_desired_vel, dist_m * speed_sensitivity)
+                        ux = target_dx / dist_px
+                        uy = -target_dy / dist_px  # Inverted because screen Y is down
+                        target_vx = ux * desired_speed
+                        target_vy = uy * desired_speed
+                elif event.button == 3:
+                    # Right Click: Stop
+                    target_dx = 0.0
+                    target_dy = 0.0
+                    desired_speed = 0.0
+                    target_vx = 0.0
+                    target_vy = 0.0
+            elif event.type == pygame.MOUSEWHEEL:
+                speed_sensitivity = max(0.5, min(4.0, speed_sensitivity + event.y * 0.2))
+                # Re-scale current target speed if active
+                dist_px = math.hypot(target_dx, target_dy)
+                if dist_px > 10:
+                    dist_m = dist_px / PIXELS_PER_METER
+                    desired_speed = min(env_params.max_desired_vel, dist_m * speed_sensitivity)
+                    ux = target_dx / dist_px
+                    uy = -target_dy / dist_px
+                    target_vx = ux * desired_speed
+                    target_vy = uy * desired_speed
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif event.key == pygame.K_m:
-                    is_ai_mode = not is_ai_mode
+                elif event.key == pygame.K_SPACE:
+                    target_dx = 0.0
+                    target_dy = 0.0
+                    desired_speed = 0.0
+                    target_vx = 0.0
+                    target_vy = 0.0
                 elif event.key == pygame.K_r:
                     state = init_vehicle_state()
+                    target_dx = 0.0
+                    target_dy = 0.0
+                    desired_speed = 0.0
+                    target_vx = 0.0
+                    target_vy = 0.0
                     skid_marks.clear()
-            elif event.type == pygame.MOUSEWHEEL:
-                speed_sensitivity = max(0.2, min(3.0, speed_sensitivity + event.y * 0.1))
-                
-        # 2. Control Processing
-        keys = pygame.key.get_pressed()
-        
-        # Screen position of car
-        car_sx, car_sy = world_to_screen(float(state.x), float(state.y), cam_x, cam_y)
-        
-        # Exact screen-space distance and direction from car to cursor (immune to camera lag!)
-        dx_screen = mouse_px - car_sx
-        dy_screen = -(mouse_py - car_sy)  # Inverted because screen Y points down, world Y points up
-        screen_dist_px = math.hypot(dx_screen, dy_screen)
-        dist_to_mouse = screen_dist_px / PIXELS_PER_METER
-        
-        if dist_to_mouse > 0.4:
-            target_ux = dx_screen / screen_dist_px
-            target_uy = dy_screen / screen_dist_px
-            # Distance directly determines desired speed (magnitude of vector)!
-            desired_speed = min(env_params.max_desired_vel, dist_to_mouse * speed_sensitivity)
-        else:
-            target_ux = 0.0
-            target_uy = 0.0
-            desired_speed = 0.0
-            
-        target_vx = target_ux * desired_speed
-        target_vy = target_uy * desired_speed
-        
+                    
+        # 2. Ego-Centric Observation for RL Agent
         car_th = float(state.theta)
-        cos_th = math.cos(car_th)
-        sin_th = math.sin(car_th)
+        target_speed = math.hypot(target_vx, target_vy)
+        has_target = target_speed > 0.1
         
-        if is_ai_mode:
-            # 2-input target velocity in ego frame:
-            ego_target_vx = target_vx * cos_th + target_vy * sin_th
-            ego_target_vy = -target_vx * sin_th + target_vy * cos_th
-            
-            ex = ego_target_vx - float(state.vx)
-            ey = ego_target_vy - float(state.vy)
-            
-            target_speed = math.hypot(target_vx, target_vy)
-            has_target = target_speed > 0.1
-            cos_target_ego = (ego_target_vx / target_speed) if has_target else 1.0
-            sin_target_ego = (ego_target_vy / target_speed) if has_target else 0.0
-            
-            # 9-dimensional observation vector:
-            obs = torch.tensor([
-                ex / env_params.v_norm_scale,
-                ey / env_params.v_norm_scale,
-                desired_speed / env_params.v_norm_scale,
-                cos_target_ego,
-                sin_target_ego,
-                float(state.vx) / env_params.v_norm_scale,
-                float(state.vy) / env_params.v_norm_scale,
-                float(state.steer) / params.max_steer,
-                float(state.omega) / env_params.omega_norm_scale,
-            ], dtype=torch.float32, device=device).unsqueeze(0)
-            
-            with torch.no_grad():
-                act = agent.act_deterministic(obs).cpu().squeeze(0)
-                steer_act = float(act[0])
-                torque_act = float(act[1])
-        else:
-            # Manual Driver
-            steer_target = 0.0
-            if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-                steer_target += 1.0  # Turn left
-            if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-                steer_target -= 1.0  # Turn right
-                
-            torque_act = 0.0
-            if keys[pygame.K_w] or keys[pygame.K_UP]:
-                torque_act += 1.0   # Gas
-            if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-                torque_act -= 1.0   # Brake
-            if keys[pygame.K_SPACE]:
-                torque_act = -1.0   # Handbrake
-                
-            steer_act = steer_target
+        target_angle = math.atan2(target_vy, target_vx)
+        heading_err = (target_angle - car_th + math.pi) % (2.0 * math.pi) - math.pi
+        cos_target_ego = math.cos(heading_err) if has_target else 1.0
+        sin_target_ego = math.sin(heading_err) if has_target else 0.0
+        
+        ex = target_speed - float(state.vx)
+        ey = -float(state.vy)
+        
+        obs = torch.tensor([[
+            ex / env_params.v_norm_scale,
+            ey / env_params.v_norm_scale,
+            desired_speed / env_params.v_norm_scale,
+            cos_target_ego,
+            sin_target_ego,
+            float(state.vx) / env_params.v_norm_scale,
+            float(state.vy) / env_params.v_norm_scale,
+            float(state.steer) / params.max_steer,
+            float(state.omega) / env_params.omega_norm_scale,
+        ]], dtype=torch.float32, device=device)
+        
+        with torch.no_grad():
+            act = agent.act_deterministic(obs).cpu().squeeze(0)
+            steer_act = float(act[0])
+            torque_act = float(act[1])
             
         # 3. Physics Step
         state = physics_step_jit(
@@ -239,16 +272,17 @@ def main():
             jnp.array(torque_act, dtype=jnp.float32),
         )
         
-        # Responsive camera tracking
-        cam_x += (float(state.x) - cam_x) * 0.4
-        cam_y += (float(state.y) - cam_y) * 0.4
+        # Smooth camera tracking
+        cam_x += (float(state.x) - cam_x) * 0.35
+        cam_y += (float(state.y) - cam_y) * 0.35
         
-        # 4. Skid Marks Calculation (Tire Tracks)
+        # 4. Skid Marks
+        car_th = float(state.theta)
+        cos_th = math.cos(car_th)
+        sin_th = math.sin(car_th)
         lr = params.lr
         track_w = 0.8
         
-        # Rear tire positions in world coordinates
-        # Heading is (cos_th, sin_th); Lateral left is (-sin_th, cos_th)
         rl_x = float(state.x) - lr * cos_th + track_w * (-sin_th)
         rl_y = float(state.y) - lr * sin_th + track_w * cos_th
         rr_x = float(state.x) - lr * cos_th - track_w * (-sin_th)
@@ -277,13 +311,15 @@ def main():
         gx = start_gx
         while gx <= end_gx:
             sx, _ = world_to_screen(gx, 0, cam_x, cam_y)
-            pygame.draw.line(screen, GRID_COLOR, (sx, 0), (sx, WINDOW_HEIGHT), 1)
+            if 0 <= sx <= WINDOW_WIDTH:
+                pygame.draw.line(screen, GRID_COLOR, (sx, 0), (sx, WINDOW_HEIGHT), 1)
             gx += grid_spacing_m
             
         gy = start_gy
         while gy <= end_gy:
             _, sy = world_to_screen(0, gy, cam_x, cam_y)
-            pygame.draw.line(screen, GRID_COLOR, (0, sy), (WINDOW_WIDTH, sy), 1)
+            if 0 <= sy <= WINDOW_HEIGHT:
+                pygame.draw.line(screen, GRID_COLOR, (0, sy), (WINDOW_WIDTH, sy), 1)
             gy += grid_spacing_m
             
         # B. Skid Marks
@@ -292,25 +328,39 @@ def main():
             p2 = world_to_screen(x2, y2, cam_x, cam_y)
             pygame.draw.line(screen, (34, 36, 44), p1, p2, 4)
             
-        # C. Target Velocity Vector (AI Mode)
         car_sx, car_sy = world_to_screen(float(state.x), float(state.y), cam_x, cam_y)
-        if is_ai_mode:
-            # Line from car to cursor representing the target velocity vector
-            pygame.draw.line(screen, (0, 180, 110), (car_sx, car_sy), (mouse_px, mouse_py), 2)
+        
+        # C. Target Velocity Vector & Placed Marker
+        if has_target:
+            marker_px = int(car_sx + target_dx)
+            marker_py = int(car_sy + target_dy)
             
-            # Cursor marker
-            pygame.draw.circle(screen, TARGET_COLOR, (mouse_px, mouse_py), 8, 2)
-            pygame.draw.circle(screen, TARGET_COLOR, (mouse_px, mouse_py), 3)
+            # Line from car to placed marker
+            pygame.draw.line(screen, TARGET_LINE, (car_sx, car_sy), (marker_px, marker_py), 2)
             
-            # Floating target speed label beside cursor
+            # Marker circle
+            pygame.draw.circle(screen, TARGET_COLOR, (marker_px, marker_py), 8, 2)
+            pygame.draw.circle(screen, TARGET_COLOR, (marker_px, marker_py), 3)
+            
+            # Floating target speed badge
             target_badge = font_small.render(f"🎯 {desired_speed * 3.6:3.0f} km/h", True, TARGET_COLOR)
-            screen.blit(target_badge, (mouse_px + 14, mouse_py - 10))
+            screen.blit(target_badge, (marker_px + 14, marker_py - 10))
             
-        # D. Wheels (Aligned with car heading + steering!)
+        # Car Actual Velocity Vector (Cyan Blue arrow)
+        current_speed = math.hypot(float(state.vx), float(state.vy))
+        current_speed_kmh = current_speed * 3.6
+        if current_speed > 0.3:
+            vel_len_px = current_speed * PIXELS_PER_METER * 0.8
+            world_vx = float(state.vx) * cos_th - float(state.vy) * sin_th
+            world_vy = float(state.vx) * sin_th + float(state.vy) * cos_th
+            vel_tip_sx = int(car_sx + vel_len_px * (world_vx / current_speed))
+            vel_tip_sy = int(car_sy - vel_len_px * (world_vy / current_speed))
+            draw_vector_arrow(screen, (car_sx, car_sy), (vel_tip_sx, vel_tip_sy), ACTUAL_COLOR, width=2, head_size=10)
+            
+        # D. Wheels (Front steering & Rear fixed)
         lf = params.lf
         steer_angle = float(state.steer)
         
-        # Front Left & Right Wheels (at +lf along forward axis, rotated by theta + steer)
         for side in [track_w, -track_w]:
             wx = float(state.x) + lf * cos_th + side * (-sin_th)
             wy = float(state.y) + lf * sin_th + side * cos_th
@@ -319,7 +369,6 @@ def main():
                 WHEEL_LENGTH_M, WHEEL_WIDTH_M, car_th + steer_angle, cam_x, cam_y
             )
             
-        # Rear Left & Right Wheels (at -lr along forward axis, rotated by theta)
         for side in [track_w, -track_w]:
             wx = float(state.x) - lr * cos_th + side * (-sin_th)
             wy = float(state.y) - lr * sin_th + side * cos_th
@@ -328,7 +377,7 @@ def main():
                 WHEEL_LENGTH_M, WHEEL_WIDTH_M, car_th, cam_x, cam_y
             )
             
-        # E. Car Body (Length along forward axis, Width along lateral axis)
+        # E. Car Body
         draw_oriented_box(
             screen, CAR_BODY_COLOR, float(state.x), float(state.y),
             CAR_LENGTH_M, CAR_WIDTH_M, car_th, cam_x, cam_y
@@ -336,23 +385,21 @@ def main():
         
         # Cabin / Roof
         roof_offset = -0.3
-        roof_x = float(state.x) + roof_offset * cos_th
-        roof_y = float(state.y) + roof_offset * sin_th
         draw_oriented_box(
-            screen, CAR_ROOF_COLOR, roof_x, roof_y,
+            screen, CAR_ROOF_COLOR,
+            float(state.x) + roof_offset * cos_th, float(state.y) + roof_offset * sin_th,
             CAR_LENGTH_M * 0.45, CAR_WIDTH_M * 0.75, car_th, cam_x, cam_y
         )
         
         # Windshield
         windshield_offset = 0.6
-        ws_x = float(state.x) + windshield_offset * cos_th
-        ws_y = float(state.y) + windshield_offset * sin_th
         draw_oriented_box(
-            screen, CAR_GLASS_COLOR, ws_x, ws_y,
+            screen, CAR_GLASS_COLOR,
+            float(state.x) + windshield_offset * cos_th, float(state.y) + windshield_offset * sin_th,
             0.5, CAR_WIDTH_M * 0.68, car_th, cam_x, cam_y
         )
         
-        # Front Headlights (Yellow/White, facing forward)
+        # Headlights & Taillights
         hl_dist = CAR_LENGTH_M * 0.46
         hl_w = CAR_WIDTH_M * 0.35
         for side in [hl_w, -hl_w]:
@@ -361,7 +408,6 @@ def main():
             hsx, hsy = world_to_screen(hx, hy, cam_x, cam_y)
             pygame.draw.circle(screen, (255, 255, 210), (hsx, hsy), 4)
             
-        # Rear Taillights (Red, facing backward)
         tl_dist = -CAR_LENGTH_M * 0.48
         for side in [hl_w, -hl_w]:
             tx = float(state.x) + tl_dist * cos_th + side * (-sin_th)
@@ -370,55 +416,50 @@ def main():
             pygame.draw.circle(screen, (255, 40, 40), (tsx, tsy), 4)
             
         # F. Modern HUD & Telemetry
-        current_speed_kmh = math.hypot(float(state.vx), float(state.vy)) * 3.6
         desired_speed_kmh = desired_speed * 3.6
         
-        hud_rect = pygame.Rect(20, 20, 360, 260)
+        hud_rect = pygame.Rect(20, 20, 360, 240)
         hud_surf = pygame.Surface((hud_rect.width, hud_rect.height), pygame.SRCALPHA)
         hud_surf.fill(HUD_BG)
         pygame.draw.rect(hud_surf, (80, 90, 110), hud_surf.get_rect(), 1, border_radius=8)
         screen.blit(hud_surf, hud_rect.topleft)
         
         # Mode Badge
-        mode_text = "MODE: AI DRIVER (2D Target Vector)" if is_ai_mode else "MODE: MANUAL DRIFT"
-        mode_color = TARGET_COLOR if is_ai_mode else DRIFT_COLOR
-        screen.blit(font_med.render(mode_text, True, mode_color), (35, 32))
+        screen.blit(font_med.render("MODE: AI DRIVER (Click to Place)", True, TARGET_COLOR), (35, 32))
         
         # Speedometer
         speed_str = f"SPEED: {current_speed_kmh:5.1f} km/h"
-        target_str = f" (TARGET: {desired_speed_kmh:4.0f})" if is_ai_mode else ""
-        screen.blit(font_med.render(speed_str + target_str, True, TEXT_COLOR), (35, 65))
+        target_str = f" (TARGET: {desired_speed_kmh:4.0f})" if has_target else " (STOPPED)"
+        screen.blit(font_med.render(speed_str + target_str, True, TEXT_COLOR), (35, 62))
         
         # Speed bar
         bar_w = 320
-        pygame.draw.rect(screen, (40, 44, 54), (35, 95, bar_w, 10), border_radius=4)
+        pygame.draw.rect(screen, (40, 44, 54), (35, 90, bar_w, 10), border_radius=4)
         speed_fill = min(1.0, current_speed_kmh / 100.0) * bar_w
-        pygame.draw.rect(screen, (70, 160, 240), (35, 95, int(speed_fill), 10), border_radius=4)
-        
+        pygame.draw.rect(screen, (70, 160, 240), (35, 90, int(speed_fill), 10), border_radius=4)
+        if has_target and desired_speed_kmh > 0:
+            target_mark_x = int(35 + min(1.0, desired_speed_kmh / 100.0) * bar_w)
+            pygame.draw.line(screen, TARGET_COLOR, (target_mark_x, 87), (target_mark_x, 103), 3)
+            
         # Drift Meter
         slip_text = f"LATERAL SLIP: {lateral_slip:4.2f} m/s"
-        screen.blit(font_small.render(slip_text, True, TEXT_COLOR), (35, 118))
+        screen.blit(font_small.render(slip_text, True, TEXT_COLOR), (35, 112))
         if is_sliding:
             drift_badge = font_med.render("★ DRIFTING ★", True, (255, 60, 60))
-            screen.blit(drift_badge, (215, 115))
+            screen.blit(drift_badge, (215, 109))
             
-        # Drift bar
-        pygame.draw.rect(screen, (40, 44, 54), (35, 140, bar_w, 8), border_radius=4)
-        slip_fill = min(1.0, lateral_slip / 4.0) * bar_w
-        pygame.draw.rect(screen, DRIFT_COLOR if is_sliding else (100, 120, 140), (35, 140, int(slip_fill), 8), border_radius=4)
-        
-        # Steering & Torque meters
         steer_deg = math.degrees(steer_angle)
-        screen.blit(font_small.render(f"STEERING: {steer_deg:5.1f}°", True, TEXT_COLOR), (35, 160))
-        screen.blit(font_small.render(f"TORQUE:   {torque_act:+4.2f}", True, TEXT_COLOR), (200, 160))
+        screen.blit(font_small.render(f"STEERING: {steer_deg:5.1f}°", True, TEXT_COLOR), (35, 138))
+        torque_col = (100, 255, 140) if torque_act > 0 else (255, 110, 110) if torque_act < 0 else TEXT_COLOR
+        actual_nm = torque_act * params.max_torque if torque_act >= 0 else torque_act * abs(params.min_torque)
+        screen.blit(font_small.render(f"TORQUE: {actual_nm:+5.0f} Nm", True, torque_col), (190, 138))
         
         # Quick Help
-        screen.blit(font_small.render("[M] Toggle Mode | [R] Reset | [ESC] Exit", True, (160, 170, 190)), (35, 195))
-        if is_ai_mode:
-            screen.blit(font_small.render("Mouse Distance = Speed | Scroll: Sensitivity", True, (130, 200, 160)), (35, 218))
-        else:
-            screen.blit(font_small.render("WASD: Drive/Steer | SPACE: Handbrake", True, (240, 190, 120)), (35, 218))
-            
+        pygame.draw.line(screen, (50, 56, 70), (35, 168), (35 + bar_w, 168), 1)
+        screen.blit(font_small.render("Left Click : Place target marker (car -> marker = vel)", True, (140, 220, 180)), (35, 178))
+        screen.blit(font_small.render("Right Click / SPACE: Stop | Scroll: Speed scale", True, TEXT_MUTED), (35, 198))
+        screen.blit(font_small.render("[R]: Reset Car | [ESC]: Exit", True, TEXT_MUTED), (35, 218))
+        
         pygame.display.flip()
         
     pygame.quit()

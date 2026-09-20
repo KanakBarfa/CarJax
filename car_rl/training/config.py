@@ -14,18 +14,18 @@ class PPOConfig:
     # Environment & Rollout
     num_envs: int = 2048
     num_steps: int = 64            # Steps per rollout: 2048 * 64 = 131,072 steps / iter
-    total_timesteps: int = 5_000_000
+    total_timesteps: int = 15_000_000
     
     # PPO Hyperparameters
-    learning_rate: float = 3e-4
+    learning_rate: float = 8e-4
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    num_minibatches: int = 4       # Mini-batch size = 32,768 transitions
+    num_minibatches: int = 8       # Mini-batch size = 16,384 transitions
     update_epochs: int = 4
     clip_coef: float = 0.2
     clip_vloss: bool = True
-    ent_coef: float = 0.0002
+    ent_coef: float = 0.001
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: Optional[float] = None

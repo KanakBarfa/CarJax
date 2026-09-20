@@ -220,3 +220,8 @@ class PPOTrainer:
         total_time = time.time() - start_time
         print(f"\nTraining Complete in {total_time:.1f}s! Best Reward: {self.best_reward:.2f}")
         self.writer.close()
+
+
+if __name__ == "__main__":
+    trainer = PPOTrainer()
+    trainer.train()

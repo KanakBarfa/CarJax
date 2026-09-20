@@ -64,11 +64,11 @@ def sample_goal(rng: jax.random.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray
 def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
     """
     Constructs the 9-dimensional ego-centric observation vector:
-    1. ex: Longitudinal velocity error in car frame (v_target_x_ego - vx) / v_scale
-    2. ey: Lateral velocity error in car frame (v_target_y_ego - vy) / v_scale
-    3. Target speed: ||v_target|| / v_scale
-    4. cos_target_ego: cos of relative target angle in car body frame
-    5. sin_target_ego: sin of relative target angle in car body frame
+    1. ex: Forward speed error (target_speed - vx) / v_scale
+    2. ey: Lateral slip error (0 - vy) / v_scale
+    3. Target speed: target_speed / v_scale
+    4. cos_target_ego: cos of heading error relative to target direction
+    5. sin_target_ego: sin of heading error relative to target direction (>0 turn left, <0 turn right)
     6. Current longitudinal speed: vx / v_scale
     7. Current lateral slip speed: vy / v_scale
     8. Steering angle: steer / max_steer
@@ -76,21 +76,19 @@ def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
     """
     veh = state.vehicle
     
-    cos_th = jnp.cos(veh.theta)
-    sin_th = jnp.sin(veh.theta)
-    
-    # Target velocity vector rotated into vehicle body frame
-    ego_target_vx = state.target_vx * cos_th + state.target_vy * sin_th
-    ego_target_vy = -state.target_vx * sin_th + state.target_vy * cos_th
-    
-    # Ego velocity errors
-    ex = ego_target_vx - veh.vx
-    ey = ego_target_vy - veh.vy
-    
     target_speed = jnp.sqrt(state.target_vx**2 + state.target_vy**2 + 1e-4)
     has_target = target_speed > 0.1
-    cos_target_ego = jnp.where(has_target, ego_target_vx / target_speed, 1.0)
-    sin_target_ego = jnp.where(has_target, ego_target_vy / target_speed, 0.0)
+    
+    # Target direction and relative heading error
+    target_angle = jnp.arctan2(state.target_vy, state.target_vx)
+    heading_err = jnp.arctan2(jnp.sin(target_angle - veh.theta), jnp.cos(target_angle - veh.theta))
+    cos_target_ego = jnp.where(has_target, jnp.cos(heading_err), 1.0)
+    sin_target_ego = jnp.where(has_target, jnp.sin(heading_err), 0.0)
+    
+    # Forward velocity error: target speed forward - current vx
+    ex = target_speed - veh.vx
+    # Lateral slip error: target lateral velocity is 0 (cars do not slide sideways)
+    ey = -veh.vy
     
     obs = jnp.array([
         ex / params.v_norm_scale,
@@ -115,55 +113,63 @@ def compute_reward(
     params: EnvParams,
 ) -> jnp.ndarray:
     """
-    Symmetric, calibrated velocity tracking reward with dynamic stability and spin prevention.
+    Direction-aligning, anti-spin velocity tracking reward:
+    - Strong incentive to turn and align forward heading with target direction
+    - Forward speed tracking with zero steady-state error
+    - Strict lateral slip and power-oversteer spinout prevention
     """
-    cos_th = jnp.cos(veh.theta)
-    sin_th = jnp.sin(veh.theta)
-    
-    ego_target_vx = target_vx * cos_th + target_vy * sin_th
-    ego_target_vy = -target_vx * sin_th + target_vy * cos_th
-    
-    # Longitudinal and lateral errors in vehicle frame
-    ex = ego_target_vx - veh.vx
-    ey = ego_target_vy - veh.vy
-    
-    speed_err = jnp.abs(ex)
-    norm_ey = jnp.abs(ey) / params.v_norm_scale
-    
-    # Direct speed penalty + lateral error tracking:
-    # Strongly penalizes longitudinal speed discrepancy (|ex|) to eliminate settling offset
-    r_track = 3.0 - 0.6 * speed_err - 2.0 * norm_ey
-    
-    # Tight exponential velocity tracking bonus (Laplace kernel):
-    # Scale sigma = 0.8 m/s (~2.8 km/h): Provides sharp, continuous gradient to zero error
-    total_err = jnp.sqrt(ex**2 + ey**2 + 1e-4)
-    r_bonus = 3.0 * jnp.exp(-total_err / 0.8)
-    
-    # Target heading alignment
     target_speed = jnp.sqrt(target_vx**2 + target_vy**2 + 1e-4)
-    cos_target_ego = ego_target_vx / target_speed
+    target_angle = jnp.arctan2(target_vy, target_vx)
+    heading_err = jnp.arctan2(jnp.sin(target_angle - veh.theta), jnp.cos(target_angle - veh.theta))
+    cos_target_ego = jnp.cos(heading_err)
     
-    # Straight-line stability penalty: when lateral error is small (|ey| < 0.8) and pointing forward
-    is_aligned = (jnp.abs(ey) < 0.8) & (cos_target_ego > 0.85)
+    # Forward speed error and lateral slip
+    speed_err = jnp.abs(target_speed - veh.vx)
+    norm_ey = jnp.abs(veh.vy) / params.v_norm_scale
+    
+    # Strong alignment incentive: +2.5 when facing target, -2.5 when facing away
+    align_incentive = 2.5 * cos_target_ego
+    
+    # Reverse velocity penalty: strongly discourage driving in reverse (incentive to align forward!)
+    reverse_pen = 4.0 * jnp.maximum(0.0, -veh.vx)
+    
+    # Decisive launch incentive: when below target speed, pointing forward (cos > 0.85),
+    # and NOT sliding laterally, reward full throttle for rapid launch
+    throttle_cmd = jnp.maximum(0.0, action[1])
+    is_aligned = cos_target_ego > 0.85
+    not_sliding = jnp.abs(veh.vy) < 0.4
+    accel_incentive = jnp.where((target_speed - veh.vx > 1.0) & is_aligned & not_sliding, 2.0 * throttle_cmd, 0.0)
+    
+    # Overshoot penalty: only penalize over-speeding beyond 0.8 m/s (~3 km/h)
+    overshoot_pen = jnp.where(veh.vx - target_speed > 0.8, 1.5 * (veh.vx - target_speed - 0.8), 0.0)
+    
+    # Direct speed tracking + lateral error tracking + alignment incentive
+    r_track = 4.0 - 0.5 * speed_err + align_incentive + accel_incentive - overshoot_pen - reverse_pen - 2.0 * norm_ey
+    
+    # Dual-scale exponential velocity tracking bonus:
+    # Conditioned on being aligned forward (cos > 0.7) to lock in exact speed without spinning mid-corner
+    total_err = jnp.sqrt((target_speed - veh.vx)**2 + veh.vy**2 + 1e-4)
+    r_bonus = jnp.where(
+        cos_target_ego > 0.7,
+        2.0 * jnp.exp(-total_err / 2.5) + 4.0 * jnp.exp(-total_err / 0.7),
+        0.0,
+    )
+    
+    # Straight-line stability penalty: when aligned, penalize unnecessary steering wiggle
     steer_norm = jnp.abs(veh.steer / params.vehicle.max_steer)
-    straight_steer_penalty = jnp.where(is_aligned, 1.2 * steer_norm, 0.0)
+    straight_steer_penalty = jnp.where(is_aligned & not_sliding, 1.0 * steer_norm, 0.0)
     
     # Lateral slip penalty (loss of tire grip)
-    # |vy| > 1.0 m/s indicates significant tire sliding
-    slip_pen = 1.5 * jnp.maximum(0.0, jnp.abs(veh.vy) - 1.0)
+    slip_pen = 3.0 * jnp.maximum(0.0, jnp.abs(veh.vy) - 0.4)
     
     # High-speed yaw stability penalty:
-    # Steady-state maximum yaw rate before loss of grip is mu * g / max(vx, 2.0)
     mu_g = params.vehicle.friction_coeff * params.vehicle.gravity
     max_safe_omega = mu_g / jnp.maximum(jnp.abs(veh.vx), 2.0) + 0.3
     excess_omega = jnp.maximum(0.0, jnp.abs(veh.omega) - max_safe_omega)
-    stability_pen = 2.0 * excess_omega
+    stability_pen = 3.0 * excess_omega
     
-    # Power-oversteer traction control penalty:
-    # If the vehicle is experiencing lateral slip (|vy| > 1.2), hitting positive throttle induces spinning
-    is_sliding = jnp.abs(veh.vy) > 1.2
-    throttle_cmd = jnp.maximum(0.0, action[1])
-    power_oversteer_pen = jnp.where(is_sliding, 1.5 * throttle_cmd * (jnp.abs(veh.vy) - 1.2), 0.0)
+    # Power-oversteer penalty: cut throttle if vehicle begins sliding
+    power_oversteer_pen = jnp.where(jnp.abs(veh.vy) > 0.4, 2.5 * throttle_cmd * (jnp.abs(veh.vy) - 0.4), 0.0)
     
     # Control effort regularization
     ctrl_pen = 0.002 * jnp.sum(action**2)
@@ -183,10 +189,13 @@ def compute_reward(
 def env_reset(rng: jax.random.PRNGKey, params: EnvParams = EnvParams()) -> Tuple[EnvState, jnp.ndarray]:
     """
     Pure functional reset.
-    50% of environments start in aligned steady-state cruising:
-    theta = target_angle, vx = target_speed, vy = 0, omega = 0.
-    50% of environments start in randomized speeds and orientations for dynamic transitions.
-    Target speed and heading are held for a random duration between 3.0s and 15.0s (150 to 750 steps).
+    3-way balanced reset distribution across all angles [-pi, pi]:
+    - Mode 0 (33%): Standstill launch with random target direction (v0 = 0, theta0 in [-pi, pi])
+      -> trains turning and launching forward from any angle
+    - Mode 1 (33%): Aligned steady-state cruising (v0 = target_speed, theta = target_angle)
+      -> trains zero-error cruising
+    - Mode 2 (34%): Dynamic random transitions (v0 in [0, max], theta in [-pi, pi])
+      -> trains high-speed cornering, braking before turns, and turning without spinning
     """
     rng_mode, rng_goal, rng_init, rng_spd, rng_out = jax.random.split(rng, 5)
     
@@ -194,13 +203,13 @@ def env_reset(rng: jax.random.PRNGKey, params: EnvParams = EnvParams()) -> Tuple
     target_speed = jnp.sqrt(target_vx**2 + target_vy**2 + 1e-4)
     target_angle = jnp.arctan2(target_vy, target_vx)
     
-    is_steady = jax.random.bernoulli(rng_mode, p=0.5)
+    mode = jax.random.randint(rng_mode, shape=(), minval=0, maxval=3)
     
     th0_rand = jax.random.uniform(rng_init, shape=(), minval=-jnp.pi, maxval=jnp.pi)
     v0_rand = jax.random.uniform(rng_spd, shape=(), minval=0.0, maxval=params.max_desired_vel)
     
-    th0 = jnp.where(is_steady, target_angle, th0_rand)
-    v0 = jnp.where(is_steady, target_speed, v0_rand)
+    th0 = jnp.where(mode == 1, target_angle, th0_rand)
+    v0 = jnp.where(mode == 0, 0.0, jnp.where(mode == 1, target_speed, v0_rand))
     veh = init_vehicle_state(theta=th0, vx=v0)
     
     state = EnvState(
@@ -237,6 +246,12 @@ def env_step(
         new_veh, state.target_vx, state.target_vy, action, params
     )
     
+    # Normalize reward by the duration for which it had to follow this particular vector
+    # duration_factor in [1.0, 5.0] (corresponding to 3.0s to 15.0s)
+    # Equalizes return across short & long durations, forcing immediate full-throttle launch
+    duration_factor = state.goal_duration.astype(jnp.float32) / params.min_goal_duration_steps
+    scaled_reward = base_reward / duration_factor
+    
     # 3. Dynamic goal resampling (triggers when goal_timer >= goal_duration, i.e. 3s to 15s)
     new_step = state.step_count + 1
     new_timer = state.goal_timer + 1
@@ -251,7 +266,7 @@ def env_step(
     
     # 4. Spinout detection and early termination
     is_spinout = (jnp.abs(new_veh.vy) > 4.5) & (jnp.abs(new_veh.omega) > 2.2)
-    reward = jnp.where(is_spinout, base_reward - 5.0, base_reward)
+    reward = jnp.where(is_spinout, scaled_reward - 5.0, scaled_reward)
     
     done = (new_step >= params.max_episode_steps) | is_spinout
     reset_state, reset_obs = env_reset(new_rng, params)
