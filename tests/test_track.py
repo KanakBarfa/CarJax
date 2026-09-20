@@ -115,6 +115,18 @@ def test_wall_touch_ends_episode():
     print("test_wall_touch_ends_episode OK")
 
 
+def test_reverse_target_mapping():
+    """Full back-stick commands a backward (negative-speed) target."""
+    from car_rl.env.track_env import high_to_target
+
+    tvx, tvy, des, off = high_to_target(jnp.array([0.0, -1.0]), jnp.array(0.0))
+    assert float(des) < -7.9, float(des)          # ~-8 m/s reverse target
+    assert float(tvx) < 0.0 and abs(float(tvy)) < 1e-5  # points behind
+    tvx2, _, des2, _ = high_to_target(jnp.array([0.0, 1.0]), jnp.array(0.0))
+    assert abs(float(des2) - 22.0) < 1e-5 and float(tvx2) > 0.0
+    print("test_reverse_target_mapping OK")
+
+
 def test_high_obs_and_wrapper():
     import torch
     from car_rl.env.track_wrapper import TorchBatchedTrackEnv
@@ -138,5 +150,6 @@ if __name__ == "__main__":
     test_railing_blocks_exit()
     test_mirror_and_direction_variants()
     test_wall_touch_ends_episode()
+    test_reverse_target_mapping()
     test_high_obs_and_wrapper()
     print("ALL TRACK TESTS PASSED")

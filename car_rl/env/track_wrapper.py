@@ -63,7 +63,7 @@ class TorchBatchedTrackEnv:
             jax.vmap(compute_low_obs, in_axes=(0, 0, 0, None, None, None))
         )
         self._v_target = jax.jit(
-            jax.vmap(high_to_target, in_axes=(0, 0, None))
+            jax.vmap(high_to_target, in_axes=(0, 0, None, None))
         )
         self._v_high_obs = jax.jit(jax.vmap(compute_high_obs, in_axes=(0, None)))
 
@@ -85,7 +85,9 @@ class TorchBatchedTrackEnv:
         ha_jax = jax.dlpack.from_dlpack(ha)
 
         thetas = self._state.vehicle.theta  # (E,)
-        tvx, tvy, _, _ = self._v_target(ha_jax, thetas, self.params.max_desired_vel)
+        tvx, tvy, _, _ = self._v_target(
+            ha_jax, thetas, self.params.max_desired_vel, self.params.max_reverse_vel
+        )
         low_obs_jax = self._v_low_obs(
             self._state.vehicle,
             tvx,

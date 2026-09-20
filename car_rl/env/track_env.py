@@ -39,6 +39,7 @@ class TrackParams(NamedTuple):
     v_scale: float = 25.0
     omega_scale: float = 4.0
     max_desired_vel: float = 22.0
+    max_reverse_vel: float = 8.0  # tail-first target speed; driver turns toward it
     car_radius: float = 1.1
     max_steps: int = 3000  # 60 s at 50 Hz: laps (~450 m) must be completable
     progress_scale: float = 2.0   # reward per meter advanced
@@ -62,13 +63,21 @@ class TrackState(NamedTuple):
 
 
 def high_to_target(
-    high_action: jnp.ndarray, theta: jnp.ndarray, max_vel: float = 22.0
+    high_action: jnp.ndarray,
+    theta: jnp.ndarray,
+    max_vel: float = 22.0,
+    max_rev: float = 8.0,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Ego heading+speed -> world target velocity. Returns tvx, tvy, des_speed, offset."""
+    """Ego heading+speed -> world target velocity.
+
+    Speed stick is bidirectional: [0, +1] -> forward target 0..max_vel,
+    [-1, 0] -> backward target 0..max_rev (points behind the car).
+    Returns tvx, tvy, des_speed (signed), offset.
+    """
     a_head = jnp.clip(high_action[0], -1.0, 1.0)
     a_speed = jnp.clip(high_action[1], -1.0, 1.0)
     offset = a_head * jnp.pi
-    des_speed = (a_speed + 1.0) * 0.5 * max_vel
+    des_speed = jnp.where(a_speed >= 0.0, a_speed * max_vel, a_speed * max_rev)
     ang = theta + offset
     return des_speed * jnp.cos(ang), des_speed * jnp.sin(ang), des_speed, offset
 
