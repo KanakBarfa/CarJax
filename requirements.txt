@@ -1,0 +1,14 @@
+# Core GPU Deep Learning & Physics
+torch
+jax[cuda12]
+numpy
+scipy
+
+# Utilities & Dataclasses
+chex
+flax
+
+# Visualization & Logging
+matplotlib
+pygame
+tensorboard
