@@ -17,13 +17,9 @@ build/
 dist/
 *.egg-info/
 
-# Checkpoints & logs
-checkpoints/
+# Training logs (large, regeneratable)
 runs/
 logs/
-*.pt
-*.pth
-*.png
 
 # OS files
 .DS_Store
