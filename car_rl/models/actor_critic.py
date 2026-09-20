@@ -21,7 +21,7 @@ def layer_init(layer: nn.Linear, std: float = 1.414, bias_const: float = 0.0) ->
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int = 9, act_dim: int = 2, hidden_dim: int = 256):
+    def __init__(self, obs_dim: int = 8, act_dim: int = 2, hidden_dim: int = 256):
         super().__init__()
         
         # Critic network (Value estimator V(s))

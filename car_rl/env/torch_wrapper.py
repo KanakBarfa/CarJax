@@ -30,7 +30,7 @@ class TorchBatchedCarEnv:
         self.num_envs = num_envs
         self.params = params
         self.device = torch.device(device)
-        self.obs_dim = 9
+        self.obs_dim = 8
         self.act_dim = 2
         
         # JIT-compiled vectorized functions

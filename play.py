@@ -123,9 +123,9 @@ def main():
     env_params = EnvParams()
     params = env_params.vehicle
     
-    # Initialize PyTorch Agent with 9D observation
+    # Initialize PyTorch Agent with 8D clean observation
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    agent = ActorCritic(obs_dim=9, act_dim=2).to(device)
+    agent = ActorCritic(obs_dim=8, act_dim=2).to(device)
     checkpoint_path = "checkpoints/best_model.pt"
     if os.path.exists(checkpoint_path):
         agent.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -246,11 +246,9 @@ def main():
         sin_target_ego = math.sin(heading_err) if has_target else 0.0
         
         ex = target_speed - float(state.vx)
-        ey = -float(state.vy)
         
         obs = torch.tensor([[
             ex / env_params.v_norm_scale,
-            ey / env_params.v_norm_scale,
             desired_speed / env_params.v_norm_scale,
             cos_target_ego,
             sin_target_ego,

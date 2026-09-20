@@ -87,12 +87,9 @@ def compute_observation(state: EnvState, params: EnvParams) -> jnp.ndarray:
     
     # Forward velocity error: target speed forward - current vx
     ex = target_speed - veh.vx
-    # Lateral slip error: target lateral velocity is 0 (cars do not slide sideways)
-    ey = -veh.vy
     
     obs = jnp.array([
         ex / params.v_norm_scale,
-        ey / params.v_norm_scale,
         target_speed / params.v_norm_scale,
         cos_target_ego,
         sin_target_ego,
