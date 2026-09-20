@@ -15,11 +15,11 @@ Supports **realistic vehicle dynamics**, **nonlinear tire slip (Pacejka)**, and 
 |   +----------------------------------------------------+      +---------------------------+   |
 |   |                  JAX Environment                   |      |      PyTorch Trainer      |   |
 |   |  - Dynamic 2D Physics (Pacejka Tires, Drift)       |      |  - Vectorized PPO         |   |
-|   |  - Goal: Unit Vector [ux, uy] & Desired Speed      |      |  - Actor-Critic Network   |   |
+|   |  - 2-Input Target Velocity Vector [v_tx, v_ty]     |      |  - Actor-Critic Network   |   |
 |   |  - 2,048 Parallel Environments (JIT + vmap)        |      |  - 450,000+ Steps/Sec     |   |
 |   |                                                    |      |                           |   |
-|   |  Observations (Ego-centric + Dynamics):            |DLPack|                           |   |
-|   |  [ux, uy, v_des, vx, vy, speed_err, delta, omega]->| Zero-|  Loss & Gradient Updates  |   |
+|   |  Observations (9D Ego-Centric & Dynamic State):    |DLPack|                           |   |
+|   |  [ex, ey, v_tar, cos_th, sin_th, vx, vy, d, omega]->| Zero-|  Loss & Gradient Updates  |   |
 |   |                                                    | Copy |                           |   |
 |   |  Actions:                                          |<-----|                           |   |
 |   |  [a_steer, a_torque]                               |      +---------------------------+   |
@@ -28,7 +28,7 @@ Supports **realistic vehicle dynamics**, **nonlinear tire slip (Pacejka)**, and 
 |                            | (Hierarchical Interface Ready)                                   |
 |   +----------------------------------------------------+                                      |
 |   | 2D JAX Raycast Lidar (Obstacle Sensing Ready)      |                                      |
-|   | Outputs -> Sub-goal Unit Vector & Desired Speed    |                                      |
+|   | Outputs -> 2D Target Velocity Vector [v_tx, v_ty]  |                                      |
 |   +----------------------------------------------------+                                      |
 +-----------------------------------------------------------------------------------------------+
 ```
@@ -78,17 +78,28 @@ python train.py --total-timesteps 5000000 --num-envs 2048
 
 Checkpoints are saved to `checkpoints/best_model.pt` and `checkpoints/latest_model.pt`.
 
-### 4. Evaluate & Visualize Telemetry
-Run an 8-second evaluation demo that commands sharp 90° turns and high-speed directional changes:
+### 4. Interactive Real-Time UI (Drive & Test AI)
+Launch the interactive 2D simulation window on your desktop:
+```bash
+python play.py
+```
+**Controls in UI:**
+- **[M]**: Toggle between **AI Driver Mode** and **Manual Drift Mode**
+- **AI Mode**:
+  - **Mouse Position**: Aim the target velocity vector; distance from car dynamically scales commanded speed ($0\text{–}80\text{ km/h}$).
+  - **Scroll Wheel**: Adjust speed sensitivity scaling in real-time.
+- **Manual Mode**:
+  - **[W] / [S]**: Throttle / Brakes
+  - **[A] / [D]**: Steer wheels left / right
+  - **[SPACE]**: Handbrake (break rear tire traction to initiate high-speed drifts!)
+- **[R]**: Reset car position and clear skid marks
+- **[ESC]**: Exit
+
+### 5. Static Trajectory & Telemetry Plot
+Generate a static 8-second evaluation plot:
 ```bash
 python demo.py --checkpoint checkpoints/best_model.pt --output car_trajectory.png
 ```
-This generates a multi-panel telemetry plot (`car_trajectory.png`) visualizing:
-- 2D trajectory path with vehicle heading arrows (red arrows indicate lateral drift).
-- Commanded vs. actual speed tracking.
-- Lateral slip speed ($|v_y|$).
-- Front wheel steering angle (degrees).
-- Engine drive / brake torque commands.
 
 ---
 
@@ -116,6 +127,7 @@ Car/
 │   └── hierarchical/
 │       └── interface.py         # Interfaces for future higher-level raycast agent
 ├── train.py                     # CLI entry point for training
+├── play.py                      # Interactive Pygame UI (AI & Manual Drift modes)
 ├── demo.py                      # Interactive / evaluation trajectory visualizer
 └── tests/
     ├── test_physics.py          # Physics unit tests

@@ -14,7 +14,7 @@ def test_gpu_bridge_and_perf():
     
     obs = env.reset()
     assert obs.is_cuda, "Observation must be a PyTorch CUDA tensor"
-    assert obs.shape == (num_envs, 8), f"Expected shape ({num_envs}, 8), got {obs.shape}"
+    assert obs.shape == (num_envs, 9), f"Expected shape ({num_envs}, 9), got {obs.shape}"
     
     # Warmup step (triggers JIT compilation)
     print("Running warmup step (triggering JAX JIT)...")

@@ -7,10 +7,9 @@ Build a high-performance 2D Reinforcement Learning system with **authentic drift
    - Simulates lateral tire slip ($\alpha_f, \alpha_r$), yaw inertia ($I_z$), and coupled longitudinal/lateral tire friction limits.
    - Allows power-oversteer drifts (rear wheel slip under high torque), weight-transfer slides, and counter-steering drift stabilization.
 3. **Low-Level Car Agent**:
-   - **Inputs (Goal Conditioned)**:
-     - 2D **Unit Vector** $[u_x, u_y]$ indicating the desired direction of travel.
-     - **Desired Velocity** $v_{\text{desired}}$ (scalar target speed).
-     - Full car body dynamic state (longitudinal speed $v_x$, lateral slip velocity $v_y$, yaw rate $\omega$, steering angle $\delta$).
+   - **Inputs (Goal Conditioned - Only 2 Numbers!)**:
+     - 2D **Target Velocity Vector** $\vec{v}_{\text{target}} = [v_{x,\text{target}}, v_{y,\text{target}}]$ (direction specifies commanded heading, magnitude $\|\vec{v}_{\text{target}}\|$ specifies desired speed).
+     - Internal car state (current longitudinal speed $v_x$, lateral slip velocity $v_y$, speed error, steering angle $\delta$, yaw rate $\omega$).
    - **Outputs (Actuation)**:
      - **Steering control**: Steers/turns the front wheels ($\delta$).
      - **Engine torque control**: Modulates engine drive/braking torque ($T_{\text{engine}}$ applied to the wheels).

@@ -31,7 +31,7 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
     params = EnvParams()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
-    agent = ActorCritic(obs_dim=8, act_dim=2).to(device)
+    agent = ActorCritic(obs_dim=9, act_dim=2).to(device)
     if os.path.exists(checkpoint_path):
         print(f"Loading weights from {checkpoint_path}...")
         agent.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -44,11 +44,6 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
     rng, rng_init = jax.random.split(rng)
     veh = init_vehicle_state(vx=5.0)
     
-    # Target schedule: sequence of sharp turns and speed changes to test tracking and drifting
-    # Step 0-100: East at 10 m/s
-    # Step 100-200: North (sharp 90 deg turn) at 16 m/s
-    # Step 200-300: West-South-West at 20 m/s (high speed drift!)
-    # Step 300-400: South-East at 8 m/s (braking and tight turn)
     def get_command(step_idx: int):
         if step_idx < 100:
             angle = 0.0          # East
@@ -62,14 +57,13 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
         else:
             angle = -np.pi / 4.0 # South-East
             vel = 8.0
-        return np.cos(angle), np.sin(angle), vel
+        return np.cos(angle) * vel, np.sin(angle) * vel, vel
 
-    ux0, uy0, v0 = get_command(0)
+    tvx0, tvy0, v0 = get_command(0)
     state = EnvState(
         vehicle=veh,
-        goal_ux=jnp.array(ux0, dtype=jnp.float32),
-        goal_uy=jnp.array(uy0, dtype=jnp.float32),
-        desired_vel=jnp.array(v0, dtype=jnp.float32),
+        target_vx=jnp.array(tvx0, dtype=jnp.float32),
+        target_vy=jnp.array(tvy0, dtype=jnp.float32),
         step_count=jnp.array(0, dtype=jnp.int32),
         total_reward=jnp.array(0.0, dtype=jnp.float32),
         rng=rng,
@@ -85,11 +79,10 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
     print(f"Simulating {steps} dynamic vehicle steps ({steps * params.vehicle.dt:.1f} seconds)...")
     
     for t in range(steps):
-        ux_cmd, uy_cmd, vel_cmd = get_command(t)
+        tvx_cmd, tvy_cmd, vel_cmd = get_command(t)
         state = state._replace(
-            goal_ux=jnp.array(ux_cmd, dtype=jnp.float32),
-            goal_uy=jnp.array(uy_cmd, dtype=jnp.float32),
-            desired_vel=jnp.array(vel_cmd, dtype=jnp.float32),
+            target_vx=jnp.array(tvx_cmd, dtype=jnp.float32),
+            target_vy=jnp.array(tvy_cmd, dtype=jnp.float32),
         )
         
         obs_jax = compute_observation(state, params)
@@ -110,7 +103,7 @@ def run_demo(checkpoint_path: str = "checkpoints/best_model.pt", output_plot: st
         traj_steer.append(float(veh_curr.steer))
         traj_torque.append(float(action_torch[0, 1].item()))
         traj_target_vel.append(vel_cmd)
-        traj_target_angles.append(np.arctan2(uy_cmd, ux_cmd))
+        traj_target_angles.append(np.arctan2(tvy_cmd, tvx_cmd))
         
         state = next_state
 
